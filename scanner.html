@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lead Scouter Hub - 2026</title>
+    <!-- We use the html5-qrcode library because it handles camera permissions and focus automatically -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <style>
+        /* Base Theme */
+        body { font-family: 'Segoe UI', monospace; background: #121212; color: #fff; padding: 20px; text-align: center; }
+        .container { max-width: 1100px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 12px; border: 1px solid #333; }
+        
+        /* Layout Utilities */
+        .grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 20px; text-align: left; }
+        .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .btn-group { display: flex; gap: 10px; margin-top: 10px; }
+        .hidden { display: none !important; }
+
+        /* Typography */
+        h1 { margin: 0; }
+        h3 { margin-top: 0; }
+        .section-title { margin-top: 30px; border-bottom: 1px solid #333; padding-bottom: 10px; text-align: left; }
+        
+        /* Connection Status Indicator */
+        .status-badge { font-size: 12px; font-weight: bold; color: #666; transition: color 0.3s; }
+        .status-badge.connected { color: #4cd964; }
+        
+        /* Inputs & Buttons */
+        input { padding: 12px; width: 100%; margin-bottom: 10px; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 6px; box-sizing: border-box; }
+        button { padding: 12px 20px; background: #0a84ff; color: white; border: none; font-weight: bold; cursor: pointer; margin: 5px 0; width: 100%; border-radius: 6px; transition: 0.2s; }
+        button:hover { opacity: 0.9; transform: translateY(-1px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button.secondary { background: #444; }
+        button.success-btn { background: #22c55e; font-size: 18px; padding: 20px; margin-top: 15px; box-shadow: 0 4px 15px rgba(34, 197, 94, 0.4); }
+        
+        /* Console Log Area */
+        .status-log { background: #000; padding: 10px; border-radius: 6px; height: 350px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 11px; border: 1px solid #333; }
+        .log-success { color: #4cd964; }
+        .log-error { color: #ff453a; font-weight: bold; }
+        .log-info { color: #0a84ff; }
+        
+        /* Data Table */
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+        th, td { border-bottom: 1px solid #333; padding: 10px; text-align: left; }
+        th { background: #252525; color: #aaa; text-transform: uppercase; font-size: 11px; }
+        tr:hover { background: rgba(255,255,255,0.05); }
+        .empty-row td { text-align: center; padding: 20px; color: #666; }
+
+        /* Camera / Scanner Frame */
+        .cam-wrapper { position: relative; width: 100%; min-height: 350px; background: #000; border: 2px solid #444; border-radius: 8px; overflow: hidden; }
+        #reader { width: 100%; height: 100%; }
+        
+        /* Overlay that pops up after a successful scan */
+        #scan-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); backdrop-filter: blur(5px);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 10;
+        }
+        .check-icon { font-size: 60px; margin-bottom: 10px; }
+        .scan-msg { font-size: 20px; font-weight: bold; margin-bottom: 5px; }
+        .scan-detail { font-size: 14px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-row">
+        <h1>Lead Scouter</h1>
+        <div id="connection-status" class="status-badge">DISCONNECTED</div>
+    </div>
+
+    <!-- Login Screen -->
+    <div id="login-section">
+        <input type="text" id="username" value="testuser" placeholder="Username">
+        <input type="password" id="password" value="4FeetTallRisith?45!" placeholder="Password">
+        <button id="login-btn" onclick="login()">Connect to Backend</button>
+    </div>
+
+    <!-- Main Scanner Dashboard -->
+    <div id="scan-section" class="hidden">
+        <div class="grid">
+            <!-- Left Column: Camera Input -->
+            <div>
+                <h3>Live Scanner</h3>
+                <div class="cam-wrapper">
+                    <div id="reader"></div>
+                    
+                    <!-- Blocks the camera after a successful scan so we don't accidentally read it twice -->
+                    <div id="scan-overlay" class="hidden">
+                        <div class="check-icon">✅</div>
+                        <div class="scan-msg">Scan Successful!</div>
+                        <div class="scan-detail" id="scan-info">Match - Team</div>
+                        <button class="success-btn" onclick="resetScanner()">Scan Next Tablet</button>
+                    </div>
+                </div>
+                
+                <div class="btn-group">
+                    <button id="cam-btn" onclick="toggleCamera()">Start Camera</button>
+                    <button class="secondary" onclick="UI.fileInput.click()">Upload Image</button>
+                </div>
+                <input type="file" id="file-input" accept="image/*" class="hidden">
+            </div>
+
+            <!-- Right Column: System Logs -->
+            <div>
+                <h3>System Logs</h3>
+                <div id="logs" class="status-log">System Ready... Waiting for input.</div>
+                <div class="btn-group">
+                    <button class="secondary" onclick="fetchData()">Refresh Table</button>
+                    <button class="secondary" onclick="clearLogs()">Clear Logs</button>
+                </div>
+            </div>
+        </div>
+
+        <h3 class="section-title">Recent Matches</h3>
+        <table id="data-table">
+            <thead>
+                <tr>
+                    <th>Match</th>
+                    <th>Team</th>
+                    <th>Scouter</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="table-body">
+                <tr class="empty-row"><td colspan="4">Waiting for data...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    // App Configuration
+    const API_URL = "http://localhost:8000"; 
+    
+    // Global State
+    let AUTH_TOKEN = "";
+    let html5QrcodeScanner = null;
+    let isCameraOn = false;
+    let isProcessingScan = false; // Used to lock the scanner while we process a payload
+
+    // Cache our DOM elements once so the browser doesn't have to constantly search the page for them
+    const UI = {
+        loginSec: document.getElementById('login-section'),
+        scanSec: document.getElementById('scan-section'),
+        statusBadge: document.getElementById('connection-status'),
+        loginBtn: document.getElementById('login-btn'),
+        camBtn: document.getElementById('cam-btn'),
+        scanOverlay: document.getElementById('scan-overlay'),
+        scanInfo: document.getElementById('scan-info'),
+        logsBox: document.getElementById('logs'),
+        tableBody: document.getElementById('table-body'),
+        fileInput: document.getElementById('file-input'),
+        usernameInput: document.getElementById('username'),
+        passwordInput: document.getElementById('password')
+    };
+
+    // --- AUTHENTICATION ---
+    async function login() {
+        const u = UI.usernameInput.value;
+        const p = UI.passwordInput.value;
+        
+        UI.loginBtn.disabled = true;
+        UI.loginBtn.innerText = "Connecting...";
+
+        try {
+            const res = await fetch(API_URL + "/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: u, password: p })
+            });
+            const data = await res.json();
+            
+            if (res.status === 201) {
+                AUTH_TOKEN = data.accessToken;
+                
+                // Swap views
+                UI.loginSec.classList.add('hidden');
+                UI.scanSec.classList.remove('hidden');
+                
+                // Update connection indicator
+                UI.statusBadge.innerText = "CONNECTED";
+                UI.statusBadge.classList.add('connected');
+                
+                log("Login Successful", "success");
+                fetchData(); // Pre-load the table with existing matches
+            } else { 
+                log("Login Error: " + data.code, "error"); 
+            }
+        } catch (e) { 
+            log("Backend Connection Failed. Is your server (pnpm dev) running?", "error"); 
+        } finally {
+            UI.loginBtn.disabled = false;
+            UI.loginBtn.innerText = "Connect to Backend";
+        }
+    }
+
+    // --- CAMERA / SCANNER CONTROL ---
+    function toggleCamera() {
+        if (isCameraOn) {
+            // Turn off
+            if (html5QrcodeScanner) {
+                html5QrcodeScanner.clear();
+                isCameraOn = false;
+                UI.camBtn.innerText = "Start Camera";
+                UI.camBtn.classList.remove('secondary');
+            }
+        } else {
+            // Turn on - Set relatively low fps to save laptop battery, 10 is plenty for QR codes
+            html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 }, false);
+            html5QrcodeScanner.render(onScanSuccess);
+            isCameraOn = true;
+            UI.camBtn.innerText = "Stop Camera";
+            UI.camBtn.classList.add('secondary');
+        }
+    }
+
+    // Fired automatically by the library when a QR code enters the frame
+    function onScanSuccess(decodedText) {
+        // Prevent double-scanning the same code in rapid succession
+        if (isProcessingScan) return;
+        isProcessingScan = true;
+        
+        if (html5QrcodeScanner) html5QrcodeScanner.pause();
+        
+        log("QR Detected! Processing...", "info");
+        handleRawQRData(decodedText);
+    }
+
+    // Clears the success overlay and readies the camera for the next tablet
+    function resetScanner() {
+        UI.scanOverlay.classList.add('hidden');
+        if (html5QrcodeScanner) html5QrcodeScanner.resume();
+        isProcessingScan = false;
+        log("Ready for next tablet.", "info");
+    }
+
+    function showSuccessOverlay(matchNum, teamNum) {
+        UI.scanInfo.innerText = `Match ${matchNum} • Team ${teamNum}`;
+        UI.scanOverlay.classList.remove('hidden');
+    }
+
+    // --- DATA PROCESSING ---
+    
+    // The tablet app bundles multiple matches together separated by a '#' symbol.
+    // We break them apart and process them one by one.
+    async function handleRawQRData(rawData) {
+        const matches = rawData.split('#').filter(m => m.trim().length > 0);
+        let lastMatch = null;
+        
+        for (const m of matches) {
+            lastMatch = await processSingleMatch(m);
+        }
+        
+        // If at least one match succeeded, show the big green checkmark
+        if (lastMatch) {
+            showSuccessOverlay(lastMatch.match, lastMatch.team);
+            fetchData();
+        } else {
+            // If it failed (maybe bad format), resume scanner immediately
+            if (html5QrcodeScanner) html5QrcodeScanner.resume();
+            isProcessingScan = false;
+        }
+    }
+
+    // Maps the pipe-separated string from the tablet into the JSON schema the backend expects
+    async function processSingleMatch(str) {
+        try {
+            const p = str.split('|');
+            
+            // Check if this is an older version of the scouting app generating shorter strings
+            if (p.length < 18) { 
+                log(`Invalid Format (Length: ${p.length}). Is the tablet running an old version?`, "error"); 
+                return null; 
+            }
+
+            // The tablet has extra fields (like Ferrying/AutoPass) that don't exist in the strict backend database.
+            // We pack them neatly into the Notes string so lead scouters can still read them.
+            const extraData = `
+                [Start:${p[4]}] [Pass:${p[8]}] [AutoWin:${p[9]}]
+                [Ferry:${p[11]}] [Bump:${p[12]}] [Trench:${p[13]}]
+                [Def:${p[14]}-${p[15]}] [Time:${p[17]}s] [Dead:${p[18]}]
+            `.replace(/\s+/g, ' ').trim();
+
+            const fullNotes = extraData + " | " + (p[19] || "");
+
+            const payload = {
+                createdAt: new Date().toISOString(),
+                eventCode: p[0],
+                matchType: 'QUALIFICATION',
+                matchNumber: parseInt(p[1], 10),
+                teamNumber: parseInt(p[2], 10),
+                notes: fullNotes.substring(0, 400),
+                trenchOrBump: "TRENCH",
+                minorFouls: 0,
+                majorFouls: 0,
+                auto: {
+                    notes: "",
+                    movement: p[4] !== 'Center',
+                    hubScore: parseInt(p[5], 10),
+                    hubMisses: parseInt(p[6], 10),
+                    level1: p[7] === 'Park'
+                },
+                teleop: {
+                    notes: "",
+                    hubScore: parseInt(p[10], 10),
+                    hubMisses: 0,
+                    level: null
+                },
+                endgame: {
+                    notes: "",
+                    hubScore: 0,
+                    hubMisses: 0,
+                    level: p[16] === 'None' ? null : 
+                           p[16] === 'Level 2' ? 'TWO' :
+                           p[16] === 'Level 3' ? 'THREE' : 'FAILED'
+                }
+            };
+
+            const res = await fetch(API_URL + "/report", {
+                method: "POST",
+                headers: { 
+                    "Content-Type": "application/json", 
+                    "Authorization": `Bearer ${AUTH_TOKEN}` 
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.status === 201) {
+                log(`Saved Match ${p[1]} (Team ${p[2]})`, "success");
+                return { match: p[1], team: p[2] };
+            } else {
+                const err = await res.json();
+                // If it's a unique constraint error, it just means the scouter accidentally scanned it twice. Not a real issue.
+                if (err.message && err.message.includes("Unique")) {
+                    log(`Match ${p[1]} (Team ${p[2]}) was already saved earlier. Skipped.`, "info");
+                    return { match: p[1], team: p[2] };
+                } else {
+                    log(`Database Error M${p[1]}: ${JSON.stringify(err)}`, "error");
+                    return null;
+                }
+            }
+        } catch (err) { 
+            log("Crash while parsing QR: " + err.message, "error"); 
+            return null;
+        }
+    }
+
+    // --- UI UPDATES & LOGGING ---
+    
+    // Pulls down the latest 20 reports from the server so the lead scouter can verify it went through
+    async function fetchData() {
+        if (!AUTH_TOKEN) return;
+        
+        try {
+            const res = await fetch(API_URL + "/reports?take=20&skip=0", { 
+                headers: { "Authorization": `Bearer ${AUTH_TOKEN}` } 
+            });
+            const data = await res.json();
+            
+            // Sort newest first
+            data.sort((a, b) => b.id - a.id);
+
+            // Optimization: Instead of updating the DOM inside the loop (which causes screen lag),
+            // we map the array to HTML strings and inject it all at once.
+            const rowsHtml = data.map(r => {
+                // Safety fallbacks in case the backend returns partial objects
+                const scouter = r.user ? r.user.firstName : 'Unknown';
+                const matchNum = r.matchNumber || r.id; 
+                
+                return `
+                    <tr>
+                        <td style="font-weight:bold; color: #0a84ff">Q${matchNum}</td>
+                        <td style="font-weight:bold; font-size:1.1em">${r.teamNumber}</td>
+                        <td style="color:#aaa">${scouter}</td>
+                        <td style="color:#4cd964">Saved</td>
+                    </tr>
+                `;
+            }).join('');
+
+            UI.tableBody.innerHTML = rowsHtml || `<tr class="empty-row"><td colspan="4">No matches recorded yet.</td></tr>`;
+            
+        } catch (e) {
+            log("Table Sync Error: " + e.message, "error");
+        }
+    }
+
+    // Appends colored messages to the black console box
+    function log(msg, type) {
+        const span = document.createElement('div');
+        // Map our custom types to the CSS classes
+        span.className = `log-${type}`;
+        
+        const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+        span.innerText = `[${time}] ${msg}`;
+        
+        // Prepend so the newest logs appear at the top
+        UI.logsBox.prepend(span);
+    }
+
+    function clearLogs() {
+        UI.logsBox.innerHTML = '';
+        log("Logs cleared.", "info");
+    }
+
+    // Event listener for manually uploading a photo of a QR code (useful if camera is broken)
+    UI.fileInput.addEventListener('change', e => {
+        if (e.target.files.length === 0) return;
+        
+        const html5QrCode = new Html5Qrcode("reader"); 
+        html5QrCode.scanFile(e.target.files[0], true)
+            .then(txt => { onScanSuccess(txt); })
+            .catch(err => log("Could not read QR code from that image.", "error"));
+            
+        // Reset the input so they can upload the exact same file again if they want
+        e.target.value = '';
+    });
+</script>
+</body>
+</html>
