@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 
 // CONFIG
@@ -126,7 +126,7 @@ export default function PitScoutingView({ onBack, username, token }: any) {
           style={[styles.toggleBtn, form.canClimb && styles.activeGreen]}
           onPress={() => setForm({...form, canClimb: !form.canClimb})}
         >
-          <Text style={styles.toggleText}>Can they Climb? {form.canClimb ? "✅ YES" : "❌ NO"}</Text>
+          <Text style={styles.toggleText}>Can they Climb? {form.canClimb ? "YES" : "NO"}</Text>
         </TouchableOpacity>
 
         <Text style={styles.label}>Auto Routines (Describe)</Text>

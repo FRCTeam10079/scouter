@@ -20,7 +20,8 @@ import PitScoutingView from './PitScoutingView';
 
 // App setup and configuration
 // If you're testing on a real phone, remember to swap 'localhost' with your computer's local IP address
-const API_URL = 'http://localhost:8000'; 
+const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
+// go to wifi ip create a vs code port make it public copy forwared address
 
 // How many matches a scouter should do before we remind them to take a break
 const SHIFT_LENGTH = 12; 
@@ -39,16 +40,16 @@ const AUTO_POSITIONS = ['Left', 'Center', 'Right'];
 const PASS_VOLUMES = ['None', 'Low', 'Med', 'High'];
 const AUTO_WINNERS = ['Red', 'Blue', 'Tie'];
 const DEFENSE_STRATEGIES = ['None', 'Hub', 'Gateway'];
-const ENDGAME_ACTIONS = ['None', 'Level 2', 'Level 3', 'Failed'];
+const ENDGAME_ACTIONS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Failed'];
 
 // The baseline state for a new match. We keep this here so we can easily reset the form later.
 const INITIAL_MATCH_DATA: MatchData = {
   id: '', scouter: '', eventCode: '2026A', matchType: 'Qual', matchNumber: '1', teamNumber: '',
   station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
   autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false },
-  autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: 0, 
-  trenchCross: 0, defenseRating: '', defenseStrategy: 'None', incapacitated: false,
-  endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
+  autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
+  trenchCross: false, defenseRating: '', defenseStrategy: 'None', incapacitated: false,
+  deadTime: '', endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
 };
 
 // Data models
@@ -72,12 +73,13 @@ interface MatchData {
   teleMake: number;
   teleMiss: number;
   teleFerry: number;
-  bumpCross: number;
-  trenchCross: number;
+  bumpCross: boolean;
+  trenchCross: boolean;
   defenseRating: string;
   defenseStrategy: 'None' | 'Hub' | 'Gateway';
   incapacitated: boolean;
-  endgameAction: 'None' | 'Level 2' | 'Level 3' | 'Failed';
+  deadTime: string;
+  endgameAction: 'None' | 'Level 1' | 'Level 2' | 'Level 3' | 'Failed';
   climbTime: string;
   fouls: number;
   notes: string;
@@ -127,30 +129,136 @@ const OptionButton = ({ label, selected, onPress }: any) => (
   </TouchableOpacity>
 );
 
-// Screens
-const LoginView = ({ username, setUsername, handleLogin, isLoading }: any) => (
-  <View style={styles.centerContainer}>
-    <View style={styles.card}>
-      <Text style={styles.title}>FRC 2026</Text>
-      <Text style={styles.subtitle}>Scouting Login</Text>
-      
-      <Text style={styles.label}>Username</Text>
-      <TextInput 
-        style={styles.input} 
-        placeholder="testuser" 
-        placeholderTextColor="#888"
-        value={username} 
-        onChangeText={setUsername} 
-        autoCapitalize="none"
+// Fallback component for QR Code if the string is too massive
+class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(prevProps: any) {
+    if (prevProps.value !== this.props.value) {
+      if (this.state.hasError) this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    // A standard V40 QR Code can technically hold up to 4K alphanumeric characters,
+    // but react-native-qrcode-svg will crash earlier depending on strictness.
+    const isTooBig = this.props.value && this.props.value.length > 2000;
+    const windowDim = Dimensions.get('window');
+    
+    // Fit within width, but don't grow taller than the screen minus the headers and buttons
+    const qrSize = Math.min(windowDim.width - 80, windowDim.height - 300);
+
+    if (this.state.hasError || isTooBig) {
+      return (
+        <ScrollView style={{ maxHeight: 300, width: windowDim.width - 80 }}>
+          <Text style={{ color: '#ff3b30', fontWeight: 'bold', marginBottom: 10 }}>
+            Error: Data is too large for a single QR code. Maximum capacity exceeded.
+          </Text>
+          <Text style={{ color: '#ccc', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }}>
+            {this.props.value}
+          </Text>
+        </ScrollView>
+      );
+    }
+    return (
+      <QRCode 
+        value={this.props.value} 
+        size={qrSize > 100 ? qrSize : 200} 
+        backgroundColor='white' 
+        color='black' 
+        ecl='L' 
       />
+    );
+  }
+}
+
+// Screens
+const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSignUp, isLoading, password, setPassword, firstName, setFirstName, lastName, setLastName, isSignUpMode, setIsSignUpMode, teamPassword, setTeamPassword }: any) => (
+  <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+    <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+      <View style={styles.card}>
+        <Text style={styles.title}>FRC 2026</Text>
+        <Text style={styles.subtitle}>{isSignUpMode ? 'Scouting Sign Up' : 'Scouting Login'}</Text>
+        
+        {errorMessage ? (
+          <View style={{ backgroundColor: '#ff3b3033', padding: 10, borderRadius: 8, marginBottom: 15, borderWidth: 1, borderColor: '#ff3b30' }}>
+            <Text style={{ color: '#ff3b30', textAlign: 'center', fontWeight: 'bold' }}>{errorMessage}</Text>
+          </View>
+        ) : null}
+
+        <Text style={styles.label}>Username</Text>
+        <TextInput 
+          style={styles.input} 
+          placeholder="testuser" 
+          placeholderTextColor="#888"
+          value={username} 
+          onChangeText={setUsername} 
+          autoCapitalize="none"
+        />
+
+        <Text style={styles.label}>Password</Text>
+        <TextInput 
+          style={styles.input} 
+          placeholder="Password" 
+          placeholderTextColor="#888"
+          value={password} 
+          onChangeText={setPassword} 
+          secureTextEntry
+        />
+
+      {isSignUpMode && (
+        <>
+          <Text style={styles.label}>First Name</Text>
+          <TextInput 
+            style={styles.input} 
+            placeholder="First Name" 
+            placeholderTextColor="#888"
+            value={firstName} 
+            onChangeText={setFirstName} 
+          />
+
+          <Text style={styles.label}>Last Name</Text>
+          <TextInput 
+            style={styles.input} 
+            placeholder="Last Name" 
+            placeholderTextColor="#888"
+            value={lastName} 
+            onChangeText={setLastName} 
+          />
+
+          <Text style={styles.label}>Team Password</Text>
+          <TextInput 
+            style={styles.input} 
+            placeholder="AlexaIsOurScoutingLead!" 
+            placeholderTextColor="#888"
+            value={teamPassword} 
+            onChangeText={setTeamPassword} 
+            secureTextEntry
+          />
+        </>
+      )}
       
-      <TouchableOpacity style={styles.submitBtn} onPress={handleLogin} disabled={isLoading}>
-        {isLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Start Shift</Text>}
-      </TouchableOpacity>
-      
-      <Text style={styles.tinyText}>Requires internet for first login only.</Text>
-    </View>
-  </View>
+        <TouchableOpacity style={styles.submitBtn} onPress={isSignUpMode ? handleSignUp : handleLogin} disabled={isLoading}>
+          {isLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>{isSignUpMode ? 'Sign Up' : 'Start Shift'}</Text>}
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={() => setIsSignUpMode(!isSignUpMode)} style={{ marginTop: 15, alignItems: 'center', padding: 10 }}>
+          <Text style={{ color: '#0a84ff', fontWeight: 'bold' }}>
+            {isSignUpMode ? 'Already have an account? Log In' : 'Need an account? Sign Up'}
+          </Text>
+        </TouchableOpacity>
+        
+        <Text style={styles.tinyText}>Requires internet for first login only.</Text>
+      </View>
+    </ScrollView>
+  </KeyboardAvoidingView>
 );
 
 const DashboardView = ({ 
@@ -161,7 +269,13 @@ const DashboardView = ({
   matchQueue, 
   setShowQR, 
   onStart,
-  setCurrentView 
+  setCurrentView,
+  handleLogout,
+  setIsSettingsOpen,
+  isSeatUnlocked,
+  setIsSeatUnlocked,
+  textCompression,
+  setTextCompression
 }: any) => {
   // Turn the progress bar red if they are working past their shift limit
   const progress = Math.min((matchesScouted / SHIFT_LENGTH) * 100, 100);
@@ -169,7 +283,16 @@ const DashboardView = ({
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
+      <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginBottom: 10 }}>
+        <TouchableOpacity onPress={() => setIsSettingsOpen(true)} style={{ padding: 8, paddingHorizontal: 12, backgroundColor: '#333', borderRadius: 8 }}>
+          <Text style={{ color: '#fff' }}>⚙️</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={handleLogout} style={{ padding: 8, paddingHorizontal: 12, backgroundColor: '#ff3b30', borderRadius: 8 }}>
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>Logout</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={[styles.header, { marginTop: -15 }]}>
         <Text style={styles.title}>Dashboard</Text>
         <Text style={styles.subtitle}>Scouter: {username}</Text>
       </View>
@@ -184,7 +307,10 @@ const DashboardView = ({
       </View>
 
       <View style={styles.cardSection}>
-        <Text style={styles.sectionHeader}>Select Your Seat</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.sectionHeader}>Select Your Seat</Text>
+          {!isSeatUnlocked && <Text style={{ color: '#ff3b30', fontSize: 12 }}>🔒 Locked</Text>}
+        </View>
         <View style={styles.stationGrid}>
           {STATIONS.map((s) => (
             <TouchableOpacity 
@@ -192,9 +318,19 @@ const DashboardView = ({
               style={[
                 styles.stationBtn, 
                 station === s ? styles.stationBtnActive : null, 
-                s.includes('Red') ? styles.borderRed : styles.borderBlue
+                s.includes('Red') ? styles.borderRed : styles.borderBlue,
+                !isSeatUnlocked && station !== s ? { opacity: 0.5 } : null
               ]}
-              onPress={() => setStation(s)}
+              onPress={() => {
+                if (isSeatUnlocked) {
+                  setStation(s);
+                  setIsSeatUnlocked(false); // Lock it back up immediately after selection
+                  Alert.alert("Seat Locked", `You are now assigned to ${s}. Seat selection is locked.`);
+                } else {
+                  Alert.alert("Locked", "Seat selection is locked. Ask a lead to unlock it in Settings.");
+                }
+              }}
+              disabled={!isSeatUnlocked && station !== s}
             >
               <Text style={styles.stationText}>{s}</Text>
             </TouchableOpacity>
@@ -274,8 +410,8 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
 
           <View style={styles.divider} />
 
-          {/* User specifically requested counters go up by 5 here */}
-          <CounterRow label="Makes (Fuel)" value={form.autoMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
+          {/* Counters go up by 5 here */}
+          <CounterRow label="Makes (Fuel) +5" value={form.autoMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
           <CounterRow label="Miss (Fuel)" value={form.autoMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMiss: Math.max(0, p.autoMiss + v) }))} />
           
           <Text style={styles.label}>Pass Volume</Text>
@@ -317,25 +453,27 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
 
           <View style={styles.divider} />
 
-          <CounterRow label="Hits (Fuel)" value={form.teleMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
+          <CounterRow label="Hits (Fuel) +5" value={form.teleMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
           <CounterRow label="Misses" value={form.teleMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMiss: Math.max(0, p.teleMiss + v) }))} />
           <CounterRow label="Ferry Volume" value={form.teleFerry} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, teleFerry: Math.max(0, p.teleFerry + v) }))} />
 
           <View style={styles.divider} />
 
-          <Text style={styles.label}>Crossing Counts</Text>
-          <CounterRow label="Bump" value={form.bumpCross} onChange={(v: number) => setForm((p: any) => ({ ...p, bumpCross: Math.max(0, p.bumpCross + v) }))} />
-          <CounterRow label="Trench" value={form.trenchCross} onChange={(v: number) => setForm((p: any) => ({ ...p, trenchCross: Math.max(0, p.trenchCross + v) }))} />
+          <Text style={styles.label}>Crossings</Text>
+          <ToggleRow label="Bump" checked={form.bumpCross} onToggle={() => setForm((p: any) => ({ ...p, bumpCross: !p.bumpCross }))} />
+          <ToggleRow label="Trench" checked={form.trenchCross} onToggle={() => setForm((p: any) => ({ ...p, trenchCross: !p.trenchCross }))} />
 
           <View style={styles.divider} />
 
           <Text style={styles.label}>Defense Effectiveness</Text>
+          <Text style={styles.tinyTextLight}>Keep it short (max 400 chars) for the QR code</Text>
           <TextInput
             style={styles.input}
             placeholder="e.g. Needs improvement"
             placeholderTextColor="#666"
             value={form.defenseRating}
             onChangeText={(t) => setForm((p: any) => ({ ...p, defenseRating: t }))}
+            maxLength={400}
           />
 
           <Text style={styles.label}>Defense Strategy</Text>
@@ -348,6 +486,20 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
           <View style={styles.divider} />
 
           <ToggleRow label="ROBOT DIED / AFK" checked={form.incapacitated} color="#ff3b30" onToggle={() => setForm((p: any) => ({ ...p, incapacitated: !p.incapacitated }))} />
+          
+          {form.incapacitated && (
+            <View style={{ marginTop: 10 }}>
+              <Text style={styles.label}>Seconds Dead</Text>
+              <TextInput 
+                style={styles.input} 
+                placeholder="e.g. 15" 
+                placeholderTextColor="#666" 
+                keyboardType="numeric" 
+                value={form.deadTime} 
+                onChangeText={(t) => setForm((p: any) => ({ ...p, deadTime: t }))} 
+              />
+            </View>
+          )}
         </View>
 
         {/* --- Endgame Phase --- */}
@@ -376,6 +528,7 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
           <Text style={styles.sectionHeader}>Post Match</Text>
           <CounterRow label="Fouls" value={form.fouls} onChange={(v: number) => setForm((p: any) => ({ ...p, fouls: Math.max(0, p.fouls + v) }))} />
           <Text style={styles.label}>Qualitative Notes</Text>
+          <Text style={styles.tinyTextLight}>Keep it short (max 400 chars) for the QR code</Text>
           <TextInput
             style={styles.notesInput}
             multiline
@@ -383,6 +536,7 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
             placeholderTextColor="#888"
             value={form.notes}
             onChangeText={(t) => setForm((p: any) => ({ ...p, notes: t }))}
+            maxLength={400}
           />
         </View>
 
@@ -399,11 +553,26 @@ export default function App() {
   // Top level navigation state
   const [currentView, setCurrentView] = useState<ViewState>('login');
   const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [teamPassword, setTeamPassword] = useState('');
+  const [isSignUpMode, setIsSignUpMode] = useState(false);
   const [token, setToken] = useState('');
+  const [refreshToken, setRefreshToken] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // Settings / Master Seat Selection
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [seatKeyInput, setSeatKeyInput] = useState('');
+  const [isSeatUnlocked, setIsSeatUnlocked] = useState(false);
+  const [masterSeatKey, setMasterSeatKey] = useState('SC-TEAM-SEAT'); // default key format
+  const [newMasterKeyInput, setNewMasterKeyInput] = useState('');
+  const [textCompression, setTextCompression] = useState('Default');
 
   // User shift preferences
-  const [station, setStation] = useState<Station>('Red1');
+  const [station, setStation] = useState<Station | ''>('');
   const [matchesScouted, setMatchesScouted] = useState(0);
 
   // Local storage queue for offline capability
@@ -423,38 +592,119 @@ export default function App() {
     AsyncStorage.getItem('@match_queue').then(q => {
       if (q) setMatchQueue(JSON.parse(q));
     });
+    AsyncStorage.getItem('@master_seat_key').then(k => {
+      if (k) setMasterSeatKey(k);
+    });
+    AsyncStorage.getItem('@refresh_token').then(t => {
+      if (t) setRefreshToken(t);
+    });
+    AsyncStorage.getItem('@text_compression').then(c => {
+      if (c) setTextCompression(c);
+    });
   }, []);
 
   // When the match number or station changes, try to automatically figure out the team number for them
   useEffect(() => {
-    if (form.matchType === 'Qual' && MOCK_SCHEDULE[form.matchNumber]) {
+    if (form.matchType === 'Qual' && MOCK_SCHEDULE[form.matchNumber] && station) {
       const assigned = MOCK_SCHEDULE[form.matchNumber][station];
       if (assigned) setForm(p => ({ ...p, teamNumber: assigned, station }));
     }
   }, [form.matchNumber, station, form.matchType]);
 
   const handleLogin = async () => {
+    setErrorMessage('');
+    if (!username || !password) {
+      const msg = "Please enter username and password";
+      setErrorMessage(msg);
+      Alert.alert("Error", msg);
+      return;
+    }
     setIsLoading(true);
     try {
       // Connect to the backend to verify the scouter
       const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username, password: '4FeetTallRisith?45!' })
+        body: JSON.stringify({ username: username, password: password })
       });
       const data = await res.json();
       
       if (res.status === 201) {
         setToken(data.accessToken);
+        setRefreshToken(data.refreshToken);
         await AsyncStorage.setItem('@scout_username', username);
+        await AsyncStorage.setItem('@refresh_token', data.refreshToken);
         setCurrentView('dashboard');
       } else {
-        Alert.alert("Error", "Login failed (Use 'testuser')");
+        const msg = data.code || "Login failed";
+        setErrorMessage(msg);
+        Alert.alert("Error", msg);
       }
-    } catch (e) {
-      Alert.alert("Network Error", "Could not reach backend");
+    } catch (e: any) {
+      const msg = "Could not reach backend";
+      setErrorMessage(msg);
+      Alert.alert("Network Error", msg);
     }
     setIsLoading(false);
+  };
+
+  const handleSignUp = async () => {
+    setErrorMessage('');
+    if (!username || !password || !firstName || !lastName || !teamPassword) {
+      const msg = "Please fill out all fields";
+      setErrorMessage(msg);
+      Alert.alert("Error", msg);
+      return;
+    }
+    
+    setIsLoading(true);
+    
+    try {
+      const res = await fetch(`${API_URL}/auth/sign-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, firstName, lastName, teamPassword })
+      });
+      const data = await res.json();
+      
+      if (res.status === 201) {
+        setToken(data.accessToken);
+        setRefreshToken(data.refreshToken);
+        await AsyncStorage.setItem('@scout_username', username);
+        await AsyncStorage.setItem('@refresh_token', data.refreshToken);
+        setCurrentView('dashboard');
+      } else {
+        const msg = data.code || "Sign up failed";
+        setErrorMessage(msg);
+        Alert.alert("Error", msg);
+      }
+    } catch (e: any) {
+      const msg = e.message || "Could not reach backend";
+      setErrorMessage(msg);
+      Alert.alert("Network Error", msg);
+    }
+    setIsLoading(false);
+  };
+
+  const handleLogout = async () => {
+    try {
+      if (refreshToken) {
+        await fetch(`${API_URL}/auth/logout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: refreshToken
+        });
+      }
+    } catch (e) {}
+    
+    await AsyncStorage.removeItem('@scout_username');
+    await AsyncStorage.removeItem('@refresh_token');
+    setUsername('');
+    setPassword('');
+    setToken('');
+    setRefreshToken('');
+    setIsSeatUnlocked(false);
+    setCurrentView('login');
   };
 
   const handleSaveMatch = async () => {
@@ -465,16 +715,29 @@ export default function App() {
 
     // Because the old backend doesn't support our shiny new UI fields,
     // we bundle the new metrics into the generic notes string so we don't lose the data.
-    const extraData = `
-      [Start:${form.startPos}] [Pass:${form.autoPassVol}] [Collect:${JSON.stringify(form.autoCollect)}]
-      [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] 
-      [Bump:${form.bumpCross}] [Trench:${form.trenchCross}]
-      [Def:${form.defenseRating}-${form.defenseStrategy}] 
-      [Dead:${form.incapacitated}] [Time:${form.climbTime}]
-    `.replace(/\s+/g, ' ').trim();
+    let extraData = '';
+    let parsedNotes = form.notes.replace(/\|/g, ''); // Make sure to strip any accidental pipe characters
+    
+    // If incapacitated but no time entered, assume full match (150s)
+    const effectiveDeadTime = form.incapacitated ? (form.deadTime || "150") : "0";
 
-    // Make sure we strip any accidental pipe characters since we use those to split the QR code later
-    const fullNotes = `${extraData} | ${form.notes.replace(/\|/g, '')}`;
+    if (textCompression === 'Extreme') {
+      extraData = `${form.startPos.substring(0,1)}${form.autoPassVol.substring(0,1)}${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0}${form.autoWinner.substring(0,1)}${form.teleFerry}${form.bumpCross?1:0}${form.trenchCross?1:0}${form.defenseRating.substring(0,5)}${form.defenseStrategy.substring(0,1)}${form.incapacitated?1:0}${effectiveDeadTime}${form.climbTime}`;
+      parsedNotes = parsedNotes.replace(/\s+/g, ' '); // Shrink double spaces
+    } else if (textCompression === 'High') {
+      extraData = `S:${form.startPos.substring(0,1)} P:${form.autoPassVol.substring(0,1)} C:${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0} W:${form.autoWinner.substring(0,1)} F:${form.teleFerry} B:${form.bumpCross?1:0} T:${form.trenchCross?1:0} D:${form.defenseRating}-${form.defenseStrategy.substring(0,1)} X:${form.incapacitated?1:0} dT:${effectiveDeadTime} t:${form.climbTime}`;
+    } else {
+      // Default
+      extraData = `
+        [Start:${form.startPos}] [Pass:${form.autoPassVol}] [Collect:${JSON.stringify(form.autoCollect)}]
+        [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] 
+        [Bump:${form.bumpCross}] [Trench:${form.trenchCross}]
+        [Def:${form.defenseRating}-${form.defenseStrategy}] 
+        [Dead:${form.incapacitated}] [DeadTime:${effectiveDeadTime}] [Time:${form.climbTime}]
+      `.replace(/\s+/g, ' ').trim();
+    }
+
+    const fullNotes = `${extraData} | ${parsedNotes}`;
 
     // Assemble the QR string EXACTLY matching the indices expected by scanner.html
     const dataString = [
@@ -499,6 +762,66 @@ export default function App() {
       form.incapacitated ? 'DIE' : 'OK',                         // 18 (New)
       fullNotes                                                  // 19 (Notes)
     ].join('|');
+
+    // Attempt to submit to backend real-time
+    const reportPayload = {
+      createdAt: new Date().toISOString(),
+      eventCode: form.eventCode.substring(0, 5).padEnd(5, 'A'), // ensure 5 chars
+      matchType: form.matchType === 'Play' ? 'PLAYOFF' : 'QUALIFICATION',
+      matchNumber: parseInt(form.matchNumber || "1", 10),
+      teamNumber: parseInt(form.teamNumber || "1", 10),
+      notes: fullNotes.substring(0, 400),
+      minorFouls: form.fouls,
+      majorFouls: 0,
+      secondsIncapacitated: parseInt(effectiveDeadTime, 10),
+      overBump: form.bumpCross,
+      underTrench: form.trenchCross,
+      startingPosition: form.startPos.toUpperCase(),
+      auto: {
+        notes: '',
+        hubScores: form.autoMake,
+        hubMisses: form.autoMiss,
+        climb: form.autoClimb === 'Yes' ? 'LEVEL1' : (form.autoClimb === 'Fail' ? 'FAILED' : 'NONE'),
+        passes: form.autoPassVol === 'High' ? 3 : (form.autoPassVol === 'Med' ? 2 : (form.autoPassVol === 'Low' ? 1 : 0)),
+        collectDepot: form.autoCollect.depot,
+        collectNeutral: form.autoCollect.neutral,
+        collectOutpost: form.autoCollect.outpost,
+        disruptNz: false
+      },
+      teleop: {
+        notes: '',
+        hubScores: form.teleMake,
+        hubMisses: form.teleMiss,
+        level: 0,
+        climbFailed: false,
+        defended: form.defenseStrategy !== 'None',
+        passes: form.teleFerry
+      },
+      endgame: {
+        notes: '',
+        level: form.endgameAction === 'Level 3' ? 3 : (form.endgameAction === 'Level 2' ? 2 : (form.endgameAction === 'Level 1' ? 1 : 0)),
+        climbFailed: form.endgameAction === 'Failed'
+      }
+    };
+
+    try {
+      if (token) {
+        const res = await fetch(`${API_URL}/report`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(reportPayload)
+        });
+        
+        if (res.status !== 201) {
+          console.warn("Failed to submit report to backend online");
+        }
+      }
+    } catch (err) {
+      console.warn("Could not reach backend, relying only on QR queue");
+    }
 
     const newRecord: HistoryItem = {
       id: Date.now().toString(),
@@ -535,6 +858,70 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea}>
       
+      {/* Settings Modal */}
+      <Modal visible={isSettingsOpen} animationType="slide" transparent={true}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Settings / Seat Admin</Text>
+            
+            <View style={{ marginBottom: 30, width: '100%' }}>
+              <Text style={styles.label}>Unlock Seat Selection</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Only leads should know this code.</Text>
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                  placeholder="Master Key"
+                  placeholderTextColor="#888"
+                  secureTextEntry
+                  autoCapitalize="none"
+                  value={seatKeyInput}
+                  onChangeText={setSeatKeyInput}
+                />
+                <TouchableOpacity 
+                  style={{ backgroundColor: '#0a84ff', paddingHorizontal: 20, justifyContent: 'center', borderRadius: 8 }} 
+                  onPress={() => {
+                    if (seatKeyInput === masterSeatKey) {
+                      setIsSeatUnlocked(true);
+                      setSeatKeyInput('');
+                      setIsSettingsOpen(false);
+                      Alert.alert("Success", "Seat selection unlocked!");
+                    } else {
+                      Alert.alert("Error", "Incorrect key.");
+                    }
+                  }}
+                >
+                  <Text style={{ color: 'white', fontWeight: 'bold' }}>Unlock</Text>
+                </TouchableOpacity>
+              </View>
+              {isSeatUnlocked && <Text style={{ color: '#4cd964', marginTop: 5 }}>✓ Currently Unlocked</Text>}
+            </View>
+
+            <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
+              <Text style={styles.label}>QR Code Text Compression</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 10 }}>If the batch code is too big to scan, turn this up.</Text>
+              <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'center' }}>
+                {['Default', 'High', 'Extreme'].map(lvl => (
+                  <TouchableOpacity 
+                    key={lvl}
+                    style={[styles.optionBtn, textCompression === lvl ? styles.optionBtnActive : null, { flex: 1, alignItems: 'center' }]}
+                    onPress={() => {
+                      setTextCompression(lvl);
+                      AsyncStorage.setItem('@text_compression', lvl);
+                    }}
+                  >
+                    <Text style={[styles.optionBtnText, textCompression === lvl ? styles.textActive : null, { fontSize: 12 }]}>{lvl}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            
+            <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444' }]} onPress={() => setIsSettingsOpen(false)}>
+              <Text style={styles.closeBtnText}>Close Settings</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* Batch QR Code Scanner Modal */}
       <Modal visible={showQR} animationType="slide" transparent={true}>
         <View style={styles.modalContainer}>
@@ -544,12 +931,8 @@ export default function App() {
             
             <View style={styles.qrContainer}>
               {matchQueue.length > 0 && (
-                <QRCode 
+                <QRCodeWrapper 
                   value={matchQueue.map(m => m.qrString).join('#')} 
-                  size={Dimensions.get('window').width - 80} 
-                  backgroundColor='white' 
-                  color='black' 
-                  ecl='L' 
                 />
               )}
             </View>
@@ -568,10 +951,25 @@ export default function App() {
       {/* View Routing */}
       {currentView === 'login' && (
         <LoginView 
+          errorMessage={errorMessage}
           username={username} 
           setUsername={setUsername} 
           handleLogin={handleLogin} 
+          handleSignUp={handleSignUp}
           isLoading={isLoading} 
+          password={password}
+          setPassword={setPassword}
+          firstName={firstName}
+          setFirstName={setFirstName}
+          lastName={lastName}
+          setLastName={setLastName}
+          teamPassword={teamPassword}
+          setTeamPassword={setTeamPassword}
+          isSignUpMode={isSignUpMode}
+          setIsSignUpMode={(mode: boolean) => {
+            setIsSignUpMode(mode);
+            setErrorMessage('');
+          }}
         />
       )}
       
@@ -579,12 +977,24 @@ export default function App() {
         <DashboardView 
           username={username} 
           matchesScouted={matchesScouted} 
-          station={station} 
+          station={station || 'None'} 
           setStation={setStation} 
           matchQueue={matchQueue} 
           setShowQR={setShowQR} 
-          onStart={() => setCurrentView('scouting')} 
-          setCurrentView={setCurrentView} // Pass down setCurrentView so the dashboard can switch to pit scouting
+          onStart={() => {
+            if (!station) {
+              Alert.alert("Seat Required", "Please ask a lead to unlock and select a seat before scouting.");
+              return;
+            }
+            setCurrentView('scouting');
+          }} 
+          setCurrentView={setCurrentView}
+          handleLogout={handleLogout}
+          setIsSettingsOpen={setIsSettingsOpen}
+          isSeatUnlocked={isSeatUnlocked || !station}
+          setIsSeatUnlocked={setIsSeatUnlocked}
+          textCompression={textCompression}
+          setTextCompression={setTextCompression}
         />
       )}
       
@@ -764,7 +1174,7 @@ const styles = StyleSheet.create({
   countValue: {
     fontSize: 18,
     fontWeight: 'bold',
-    width: 30,
+    minWidth: 40,
     textAlign: 'center',
     color: '#fff'
   },
@@ -952,6 +1362,12 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 12,
     marginTop: 15,
+    fontStyle: 'italic'
+  },
+  tinyTextLight: {
+    color: '#888',
+    fontSize: 12,
+    marginBottom: 5,
     fontStyle: 'italic'
   }
 });
