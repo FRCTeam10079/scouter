@@ -22,7 +22,7 @@ import PitScoutingView from './PitScoutingView';
 // If you're testing on a real phone, remember to swap 'localhost' with your computer's local IP address
 // const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
 // my computer ip address 192.168.1.55
-const DEFAULT_API_URL = '192.168.1.55:8000'; // Default if nothing saved
+const DEFAULT_API_URL = '172.20.10.3:8000'; // Default if nothing saved
 // Does not work on school wifi as it blocks the connection
 // go to wifi ip create a vs code port make it public copy forwared address
 
@@ -149,7 +149,7 @@ class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
     const windowDim = Dimensions.get('window');
     
     // Fit within width, but don't grow taller than the screen minus the headers and buttons
-    const qrSize = Math.min(windowDim.width - 80, windowDim.height - 300);
+    const qrSize = this.props.size || Math.min(windowDim.width - 80, windowDim.height - 300);
 
     if (this.state.hasError || isTooBig) {
       return (
@@ -317,9 +317,10 @@ const DashboardView = ({
                 s.includes('Red') ? styles.borderRed : styles.borderBlue,
                 !isSeatUnlocked && station !== s ? { opacity: 0.5 } : null
               ]}
-              onPress={() => {
+              onPress={async () => {
                 if (isSeatUnlocked) {
                   setStation(s);
+                  await AsyncStorage.setItem('@scout_station', s);
                   setIsSeatUnlocked(false); // Lock it back up immediately after selection
                   Alert.alert("Seat Locked", `You are now assigned to ${s}. Seat selection is locked.`);
                 } else {
@@ -553,11 +554,18 @@ export default function App() {
 
   // Local storage queue for offline capability
   const [matchQueue, setMatchQueue] = useState<HistoryItem[]>([]);
+  const [historyQueue, setHistoryQueue] = useState<HistoryItem[]>([]);
   const [showQR, setShowQR] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  
+  // Logout verification
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [logoutInput, setLogoutInput] = useState('');
 
   // Match Schedule State
   const [schedule, setSchedule] = useState<any>(DEFAULT_SCHEDULE);
-  const [scheduleInput, setScheduleInput] = useState('');
+  const [tbaEventKey, setTbaEventKey] = useState('');
+  const [isFetchingTba, setIsFetchingTba] = useState(false);
 
   // API Configuration
   const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
@@ -575,6 +583,12 @@ export default function App() {
     });
     AsyncStorage.getItem('@match_queue').then(q => {
       if (q) setMatchQueue(JSON.parse(q));
+    });
+    AsyncStorage.getItem('@match_history').then(h => {
+      if (h) setHistoryQueue(JSON.parse(h));
+    });
+    AsyncStorage.getItem('@scout_station').then(s => {
+      if (s) setStation(s as Station);
     });
     // NEW: Load the saved schedule
     AsyncStorage.getItem('@match_schedule').then(s => {
@@ -594,6 +608,9 @@ export default function App() {
     });
     AsyncStorage.getItem('@text_compression').then(c => {
       if (c) setTextCompression(c);
+    });
+    AsyncStorage.getItem('@tba_event_key').then(k => {
+      if (k) setTbaEventKey(k);
     });
     AsyncStorage.getItem('@api_url').then(u => {
       if (u) {
@@ -834,6 +851,10 @@ export default function App() {
     setMatchQueue(newQueue);
     await AsyncStorage.setItem('@match_queue', JSON.stringify(newQueue));
 
+    const newHistory = [...historyQueue, newRecord];
+    setHistoryQueue(newHistory);
+    await AsyncStorage.setItem('@match_history', JSON.stringify(newHistory));
+
     setMatchesScouted(prev => prev + 1);
     
     // Automatically increment the match number for the next round
@@ -854,6 +875,59 @@ export default function App() {
     setShowQR(false);
   };
 
+  const handleFetchTba = async () => {
+    const tbaApiKey = process.env.EXPO_PUBLIC_TBA_API_KEY;
+    if (!tbaEventKey || !tbaApiKey) {
+      Alert.alert("Missing Info", "Please provide a TBA Event Key. The API key must be set in the .env file as EXPO_PUBLIC_TBA_API_KEY.");
+      return;
+    }
+
+    setIsFetchingTba(true);
+    try {
+      // Save keys to persist them so user doesn't have to re-type
+      await AsyncStorage.setItem('@tba_event_key', tbaEventKey);
+
+      const res = await fetch(`https://www.thebluealliance.com/api/v3/event/${tbaEventKey}/matches/simple`, {
+        headers: {
+          'X-TBA-Auth-Key': tbaApiKey,
+        }
+      });
+
+      if (!res.ok) {
+        throw new Error(`Failed to fetch from TBA: ${res.status}`);
+      }
+
+      const data = await res.json();
+      const newSchedule: any = {};
+
+      // Parse matches. We only care about Qualification matches ('qm')
+      data.forEach((match: any) => {
+        if (match.comp_level === 'qm') {
+          const matchNum = match.match_number;
+          // Extract team numbers cleanly (e.g. from 'frc123' to '123')
+          const redTeams = match.alliances.red.team_keys.map((k: string) => k.replace('frc', ''));
+          const blueTeams = match.alliances.blue.team_keys.map((k: string) => k.replace('frc', ''));
+          
+          newSchedule[matchNum] = {
+            'Red1': redTeams[0],
+            'Red2': redTeams[1],
+            'Red3': redTeams[2],
+            'Blue1': blueTeams[0],
+            'Blue2': blueTeams[1],
+            'Blue3': blueTeams[2],
+          };
+        }
+      });
+
+      setSchedule(newSchedule);
+      await AsyncStorage.setItem('@match_schedule', JSON.stringify(newSchedule));
+      Alert.alert("Success", `Loaded schedule for ${Object.keys(newSchedule).length} qualification matches!`);
+    } catch (e: any) {
+      Alert.alert("TBA Error", e.message || "Could not fetch match schedule.");
+    }
+    setIsFetchingTba(false);
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       
@@ -868,7 +942,7 @@ export default function App() {
               <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Only leads should know this code.</Text>
               <View style={{ flexDirection: 'row', gap: 10 }}>
                 <TextInput
-                  style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                  style={[styles.input, { flex: 1, marginBottom: 0, minHeight: 50 }]}
                   placeholder="Master Key"
                   placeholderTextColor="#888"
                   secureTextEntry
@@ -918,7 +992,7 @@ export default function App() {
               <Text style={styles.label}>Backend API URL</Text>
               <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>e.g. http://192.168.1.55:8000</Text>
               <TextInput
-                style={[styles.input, { marginBottom: 10 }]}
+                style={[styles.input, { marginBottom: 10, flex: 0, minHeight: 50 }]}
                 placeholder='http://...'
                 placeholderTextColor="#666"
                 autoCapitalize='none'
@@ -942,32 +1016,46 @@ export default function App() {
             </View>
 
             <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
-              <Text style={styles.label}>Load Match Schedule</Text>
-              <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Paste JSON: {"{'1':{'Red1':'123'...}}"}</Text>
+              <Text style={styles.label}>Fetch TBA Match Schedule</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Enter Event Key (e.g. 2024casj)</Text>
+              
               <TextInput
-                style={[styles.input, { height: 60, marginBottom: 10 }]}
-                placeholder='Paste Schedule JSON here...'
+                style={[styles.input, { marginBottom: 10, flex: 0, minHeight: 50 }]}
+                placeholder='TBA Event Key (e.g. 2024casj)'
                 placeholderTextColor="#666"
-                multiline
-                numberOfLines={3}
-                value={scheduleInput}
-                onChangeText={setScheduleInput}
+                autoCapitalize='none'
+                value={tbaEventKey}
+                onChangeText={setTbaEventKey}
               />
               <TouchableOpacity
-                style={{ backgroundColor: '#ff9500', padding: 10, borderRadius: 8, alignItems: 'center' }}
-                onPress={async () => {
-                  try {
-                    const parsed = JSON.parse(scheduleInput);
-                    setSchedule(parsed);
-                    await AsyncStorage.setItem('@match_schedule', scheduleInput);
-                    setScheduleInput('');
-                    Alert.alert("Success", "Schedule Loaded!");
-                  } catch (e) {
-                    Alert.alert("Error", "Invalid JSON format.");
-                  }
+                style={{ backgroundColor: Object.keys(schedule).length > 0 ? '#4cd964' : '#ff9500', padding: 10, borderRadius: 8, alignItems: 'center' }}
+                onPress={handleFetchTba}
+                disabled={isFetchingTba}
+              >
+                {isFetchingTba ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={{ color: 'white', fontWeight: 'bold' }}>
+                    {Object.keys(schedule).length > 0 ? `Refetch TBA Schedule` : 'Fetch TBA Schedule'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+              {Object.keys(schedule).length > 0 && (
+                <Text style={{ color: '#4cd964', textAlign: 'center', marginTop: 10, fontSize: 12 }}>
+                  ✓ {Object.keys(schedule).length} matches dynamically loaded
+                </Text>
+              )}
+            </View>
+
+            <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
+              <TouchableOpacity
+                style={{ backgroundColor: '#2b5c35', padding: 15, borderRadius: 8, alignItems: 'center' }}
+                onPress={() => {
+                  setIsSettingsOpen(false);
+                  setIsHistoryOpen(true);
                 }}
               >
-                <Text style={{ color: 'white', fontWeight: 'bold' }}>Save Schedule</Text>
+                <Text style={{ color: 'white', fontWeight: 'bold' }}>Open Overview of Past Match Details</Text>
               </TouchableOpacity>
             </View>
             
@@ -1000,6 +1088,79 @@ export default function App() {
             <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444', marginTop: 10 }]} onPress={() => setShowQR(false)}>
               <Text style={styles.closeBtnText}>✕ Close (Scan Later)</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* History Modal */}
+      <Modal visible={isHistoryOpen} animationType="slide" transparent={true}>
+        <View style={styles.modalContainer}>
+          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
+            <Text style={styles.modalTitle}>Past Match Details</Text>
+            <Text style={styles.modalSubtitle}>{historyQueue.length} Matches in History</Text>
+            
+            <ScrollView style={{ width: '100%', marginBottom: 15 }}>
+              {historyQueue.map((item, idx) => (
+                <View key={item.id} style={{ backgroundColor: '#2c2c2c', padding: 15, borderRadius: 8, marginBottom: 10 }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>Match {item.matchNum} | Team {item.teamNum}</Text>
+                  <Text style={{ color: '#aaa', marginTop: 5, fontSize: 12 }}>Raw Data:</Text>
+                  <Text style={{ color: '#888', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 10, marginTop: 2 }}>{item.qrString}</Text>
+                  <View style={{ marginTop: 10, padding: 5, backgroundColor: '#fff', alignSelf: 'flex-start' }}>
+                    <QRCodeWrapper value={item.qrString} size={100} />
+                  </View>
+                </View>
+              ))}
+              {historyQueue.length === 0 && (
+                <Text style={{ color: '#888', textAlign: 'center', marginTop: 20 }}>No matches saved yet.</Text>
+              )}
+            </ScrollView>
+            
+            <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444' }]} onPress={() => setIsHistoryOpen(false)}>
+              <Text style={styles.closeBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Logout Confirmation Modal */}
+      <Modal visible={showLogoutConfirm} animationType="fade" transparent={true}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Confirm Logout</Text>
+            <Text style={{ color: '#ff3b30', textAlign: 'center', marginBottom: 15 }}>
+              Are you sure? If you are at a competition without WiFi, you will not be able to log back in!
+            </Text>
+            <Text style={styles.label}>Type &quot;LOGOUT&quot; to confirm:</Text>
+            <TextInput
+              style={[styles.input, { marginBottom: 20, flex: 0, minHeight: 50, width: '100%' }]}
+              placeholder='LOGOUT'
+              placeholderTextColor="#666"
+              autoCapitalize='characters'
+              value={logoutInput}
+              onChangeText={setLogoutInput}
+            />
+            <View style={{ flexDirection: 'row', gap: 10, width: '100%' }}>
+              <TouchableOpacity 
+                style={[styles.closeBtn, { flex: 1, backgroundColor: '#444' }]} 
+                onPress={() => {
+                  setShowLogoutConfirm(false);
+                  setLogoutInput('');
+                }}
+              >
+                <Text style={styles.closeBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={[styles.closeBtn, { flex: 1, backgroundColor: logoutInput === 'LOGOUT' ? '#ff3b30' : '#333' }]} 
+                disabled={logoutInput !== 'LOGOUT'}
+                onPress={() => {
+                  setShowLogoutConfirm(false);
+                  setLogoutInput('');
+                  handleLogout();
+                }}
+              >
+                <Text style={styles.closeBtnText}>Logout</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1045,7 +1206,7 @@ export default function App() {
             setCurrentView('scouting');
           }} 
           setCurrentView={setCurrentView}
-          handleLogout={handleLogout}
+          handleLogout={() => setShowLogoutConfirm(true)}
           setIsSettingsOpen={setIsSettingsOpen}
           isSeatUnlocked={isSeatUnlocked || !station}
           setIsSeatUnlocked={setIsSeatUnlocked}
@@ -1229,18 +1390,18 @@ const styles = StyleSheet.create({
     gap: 10
   },
   countValue: {
-    fontSize: 18,
+    fontSize: 24,
     fontWeight: 'bold',
-    minWidth: 40,
+    minWidth: 50,
     textAlign: 'center',
     color: '#fff'
   },
   btn: {
-    width: 40,
-    height: 40,
+    width: 60,
+    height: 60,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 20
+    borderRadius: 30
   },
   btnMinus: {
     backgroundColor: '#3a2a2a',
@@ -1253,7 +1414,7 @@ const styles = StyleSheet.create({
     borderColor: '#4cd964'
   },
   btnText: {
-    fontSize: 20,
+    fontSize: 30,
     fontWeight: 'bold',
     color: '#fff'
   },
