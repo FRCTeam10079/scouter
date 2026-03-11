@@ -133,7 +133,7 @@
 
 <script>
     // App Configuration
-    const API_URL = "http://localhost:8000"; 
+    const API_URL = "http://192.168.1.55:8000"; // Change to your IP if needed
     
     // Global State
     let AUTH_TOKEN = "";
@@ -281,10 +281,10 @@
             const extraData = `
                 [Start:${p[4]}] [Pass:${p[8]}] [AutoWin:${p[9]}]
                 [Ferry:${p[11]}] [Bump:${p[12]}] [Trench:${p[13]}]
-                [Def:${p[14]}-${p[15]}] [Time:${p[17]}s] [Dead:${p[18]}]
+                [Time:${p[15]}s] [Dead:${p[16]}]
             `.replace(/\s+/g, ' ').trim();
 
-            const fullNotes = extraData + " | " + (p[19] || "");
+            const fullNotes = extraData + " | " + (p[17] || "");
 
             const payload = {
                 createdAt: new Date().toISOString(),
@@ -313,9 +313,9 @@
                     notes: "",
                     hubScore: 0,
                     hubMisses: 0,
-                    level: p[16] === 'None' ? null : 
-                           p[16] === 'Level 2' ? 'TWO' :
-                           p[16] === 'Level 3' ? 'THREE' : 'FAILED'
+                    level: p[14] === 'None' ? null : 
+                           p[14] === 'Level 2' ? 'TWO' :
+                           p[14] === 'Level 3' ? 'THREE' : 'FAILED'
                 }
             };
 

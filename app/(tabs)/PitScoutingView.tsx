@@ -11,13 +11,15 @@ import {
 } from 'react-native';
 
 // CONFIG
-const API_URL = 'http://localhost:8000'; // Change to your IP if needed
+// API URL is now passed in as a prop
+// const API_URL = 'http://192.168.1.55:8000'; 
 
-export default function PitScoutingView({ onBack, username, token }: any) {
+export default function PitScoutingView({ onBack, username, token, apiUrl }: any) {
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({
     teamNumber: '',
     drivetrain: 'Swerve', // Default
+    shooter: 'Flywheel', // Default
     weight: '',
     width: '',
     length: '',
@@ -35,6 +37,7 @@ export default function PitScoutingView({ onBack, username, token }: any) {
     // Since backend doesn't have "Drivetrain" columns, we save it here.
     const pitDataString = `[PIT REPORT] 
     [Drive: ${form.drivetrain}] 
+    [Shooter: ${form.shooter}]
     [Wt: ${form.weight}lbs] [Size: ${form.width}x${form.length}] 
     [Climb: ${form.canClimb ? 'Yes' : 'No'}] 
     [Auto: ${form.autoRoutines}] 
@@ -59,7 +62,7 @@ export default function PitScoutingView({ onBack, username, token }: any) {
 
     try {
       // Direct Online Upload (Since you said offline isn't needed here)
-      const res = await fetch(`${API_URL}/report`, {
+      const res = await fetch(`${apiUrl}/report`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -71,7 +74,7 @@ export default function PitScoutingView({ onBack, username, token }: any) {
       if (res.status === 201) {
         Alert.alert("Success", `Pit Data for Team ${form.teamNumber} saved!`);
         // Reset Form
-        setForm({ ...form, teamNumber: '', weight: '', notes: '' });
+        setForm({ ...form, teamNumber: '', weight: '', notes: '', shooter: 'Flywheel' });
       } else {
         const err = await res.json();
         Alert.alert("Error", err.code || "Upload failed");
@@ -110,6 +113,19 @@ export default function PitScoutingView({ onBack, username, token }: any) {
               onPress={() => setForm({...form, drivetrain: type})}
             >
               <Text style={[styles.btnText, form.drivetrain === type && styles.activeText]}>{type}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <Text style={styles.label}>Shooter Type</Text>
+        <View style={styles.row}>
+          {['Flywheel', 'Turret', 'Other', 'None'].map(type => (
+            <TouchableOpacity 
+              key={type} 
+              style={[styles.optionBtn, form.shooter === type && styles.activeBtn]}
+              onPress={() => setForm({...form, shooter: type})}
+            >
+              <Text style={[styles.btnText, form.shooter === type && styles.activeText]}>{type}</Text>
             </TouchableOpacity>
           ))}
         </View>

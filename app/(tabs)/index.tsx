@@ -20,26 +20,24 @@ import PitScoutingView from './PitScoutingView';
 
 // App setup and configuration
 // If you're testing on a real phone, remember to swap 'localhost' with your computer's local IP address
-const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
+// const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
+// my computer ip address 192.168.1.55
+const DEFAULT_API_URL = '192.168.1.55:8000'; // Default if nothing saved
+// Does not work on school wifi as it blocks the connection
 // go to wifi ip create a vs code port make it public copy forwared address
 
 // How many matches a scouter should do before we remind them to take a break
 const SHIFT_LENGTH = 12; 
 
-// A fake schedule to simulate pulling data from The Blue Alliance.
-// This auto-fills the team number so the scouters don't have to type it manually every time.
-const MOCK_SCHEDULE: any = {
-  "1": { "Red1": "254", "Red2": "1678", "Red3": "1323", "Blue1": "118", "Blue2": "148", "Blue3": "3310" },
-  "2": { "Red1": "971", "Red2": "973", "Red3": "1690", "Blue1": "2056", "Blue2": "1114", "Blue3": "1241" },
-  "3": { "Red1": "4414", "Red2": "2910", "Red3": "5985", "Blue1": "987", "Blue2": "359", "Blue3": "25" },
-};
+// A default schedule (empty) to start with.
+// We will load the real schedule from Settings -> Paste JSON
+const DEFAULT_SCHEDULE: any = {};
 
 // Static lists for our UI buttons so React doesn't recreate them on every single render
 const STATIONS = ['Red1', 'Red2', 'Red3', 'Blue1', 'Blue2', 'Blue3'];
 const AUTO_POSITIONS = ['Left', 'Center', 'Right'];
 const PASS_VOLUMES = ['None', 'Low', 'Med', 'High'];
 const AUTO_WINNERS = ['Red', 'Blue', 'Tie'];
-const DEFENSE_STRATEGIES = ['None', 'Hub', 'Gateway'];
 const ENDGAME_ACTIONS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Failed'];
 
 // The baseline state for a new match. We keep this here so we can easily reset the form later.
@@ -48,7 +46,7 @@ const INITIAL_MATCH_DATA: MatchData = {
   station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
   autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false },
   autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
-  trenchCross: false, defenseRating: '', defenseStrategy: 'None', incapacitated: false,
+  trenchCross: false, incapacitated: false,
   deadTime: '', endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
 };
 
@@ -75,8 +73,6 @@ interface MatchData {
   teleFerry: number;
   bumpCross: boolean;
   trenchCross: boolean;
-  defenseRating: string;
-  defenseStrategy: 'None' | 'Hub' | 'Gateway';
   incapacitated: boolean;
   deadTime: string;
   endgameAction: 'None' | 'Level 1' | 'Level 2' | 'Level 3' | 'Failed';
@@ -465,26 +461,6 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
 
           <View style={styles.divider} />
 
-          <Text style={styles.label}>Defense Effectiveness</Text>
-          <Text style={styles.tinyTextLight}>Keep it short (max 400 chars) for the QR code</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. Needs improvement"
-            placeholderTextColor="#666"
-            value={form.defenseRating}
-            onChangeText={(t) => setForm((p: any) => ({ ...p, defenseRating: t }))}
-            maxLength={400}
-          />
-
-          <Text style={styles.label}>Defense Strategy</Text>
-          <View style={styles.optionRow}>
-            {DEFENSE_STRATEGIES.map(opt => (
-              <OptionButton key={opt} label={opt} selected={form.defenseStrategy === opt} onPress={() => setForm((p: any) => ({ ...p, defenseStrategy: opt }))} />
-            ))}
-          </View>
-
-          <View style={styles.divider} />
-
           <ToggleRow label="ROBOT DIED / AFK" checked={form.incapacitated} color="#ff3b30" onToggle={() => setForm((p: any) => ({ ...p, incapacitated: !p.incapacitated }))} />
           
           {form.incapacitated && (
@@ -579,6 +555,14 @@ export default function App() {
   const [matchQueue, setMatchQueue] = useState<HistoryItem[]>([]);
   const [showQR, setShowQR] = useState(false);
 
+  // Match Schedule State
+  const [schedule, setSchedule] = useState<any>(DEFAULT_SCHEDULE);
+  const [scheduleInput, setScheduleInput] = useState('');
+
+  // API Configuration
+  const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
+  const [apiUrlInput, setApiUrlInput] = useState('');
+
   const [form, setForm] = useState<MatchData>(INITIAL_MATCH_DATA);
 
   // Check if they left the app and came back, so they don't have to login again
@@ -592,6 +576,16 @@ export default function App() {
     AsyncStorage.getItem('@match_queue').then(q => {
       if (q) setMatchQueue(JSON.parse(q));
     });
+    // NEW: Load the saved schedule
+    AsyncStorage.getItem('@match_schedule').then(s => {
+      if (s) {
+        try {
+          setSchedule(JSON.parse(s));
+        } catch (e) {
+          console.log("Failed to parse saved schedule");
+        }
+      }
+    });
     AsyncStorage.getItem('@master_seat_key').then(k => {
       if (k) setMasterSeatKey(k);
     });
@@ -601,15 +595,23 @@ export default function App() {
     AsyncStorage.getItem('@text_compression').then(c => {
       if (c) setTextCompression(c);
     });
+    AsyncStorage.getItem('@api_url').then(u => {
+      if (u) {
+        setApiUrl(u);
+        setApiUrlInput(u); // Pre-fill input with loaded value
+      } else {
+        setApiUrlInput(DEFAULT_API_URL);
+      }
+    });
   }, []);
 
   // When the match number or station changes, try to automatically figure out the team number for them
   useEffect(() => {
-    if (form.matchType === 'Qual' && MOCK_SCHEDULE[form.matchNumber] && station) {
-      const assigned = MOCK_SCHEDULE[form.matchNumber][station];
+    if (form.matchType === 'Qual' && schedule[form.matchNumber] && station) {
+      const assigned = schedule[form.matchNumber][station];
       if (assigned) setForm(p => ({ ...p, teamNumber: assigned, station }));
     }
-  }, [form.matchNumber, station, form.matchType]);
+  }, [form.matchNumber, station, form.matchType, schedule]);
 
   const handleLogin = async () => {
     setErrorMessage('');
@@ -622,7 +624,7 @@ export default function App() {
     setIsLoading(true);
     try {
       // Connect to the backend to verify the scouter
-      const res = await fetch(`${API_URL}/auth/login`, {
+      const res = await fetch(`${apiUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username, password: password })
@@ -660,7 +662,7 @@ export default function App() {
     setIsLoading(true);
     
     try {
-      const res = await fetch(`${API_URL}/auth/sign-up`, {
+      const res = await fetch(`${apiUrl}/auth/sign-up`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, firstName, lastName, teamPassword })
@@ -689,7 +691,7 @@ export default function App() {
   const handleLogout = async () => {
     try {
       if (refreshToken) {
-        await fetch(`${API_URL}/auth/logout`, {
+        await fetch(`${apiUrl}/auth/logout`, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain' },
           body: refreshToken
@@ -722,17 +724,16 @@ export default function App() {
     const effectiveDeadTime = form.incapacitated ? (form.deadTime || "150") : "0";
 
     if (textCompression === 'Extreme') {
-      extraData = `${form.startPos.substring(0,1)}${form.autoPassVol.substring(0,1)}${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0}${form.autoWinner.substring(0,1)}${form.teleFerry}${form.bumpCross?1:0}${form.trenchCross?1:0}${form.defenseRating.substring(0,5)}${form.defenseStrategy.substring(0,1)}${form.incapacitated?1:0}${effectiveDeadTime}${form.climbTime}`;
+      extraData = `${form.startPos.substring(0,1)}${form.autoPassVol.substring(0,1)}${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0}${form.autoWinner.substring(0,1)}${form.teleFerry}${form.bumpCross?1:0}${form.trenchCross?1:0}${form.incapacitated?1:0}${effectiveDeadTime}${form.climbTime}`;
       parsedNotes = parsedNotes.replace(/\s+/g, ' '); // Shrink double spaces
     } else if (textCompression === 'High') {
-      extraData = `S:${form.startPos.substring(0,1)} P:${form.autoPassVol.substring(0,1)} C:${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0} W:${form.autoWinner.substring(0,1)} F:${form.teleFerry} B:${form.bumpCross?1:0} T:${form.trenchCross?1:0} D:${form.defenseRating}-${form.defenseStrategy.substring(0,1)} X:${form.incapacitated?1:0} dT:${effectiveDeadTime} t:${form.climbTime}`;
+      extraData = `S:${form.startPos.substring(0,1)} P:${form.autoPassVol.substring(0,1)} C:${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0} W:${form.autoWinner.substring(0,1)} F:${form.teleFerry} B:${form.bumpCross?1:0} T:${form.trenchCross?1:0} X:${form.incapacitated?1:0} dT:${effectiveDeadTime} t:${form.climbTime}`;
     } else {
       // Default
       extraData = `
         [Start:${form.startPos}] [Pass:${form.autoPassVol}] [Collect:${JSON.stringify(form.autoCollect)}]
         [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] 
         [Bump:${form.bumpCross}] [Trench:${form.trenchCross}]
-        [Def:${form.defenseRating}-${form.defenseStrategy}] 
         [Dead:${form.incapacitated}] [DeadTime:${effectiveDeadTime}] [Time:${form.climbTime}]
       `.replace(/\s+/g, ' ').trim();
     }
@@ -755,12 +756,10 @@ export default function App() {
       form.teleFerry,                                            // 11 (New)
       form.bumpCross,                                            // 12 (New)
       form.trenchCross,                                          // 13 (New)
-      (form.defenseRating || "").toString().replace(/\|/g, ''),  // 14 (New)
-      form.defenseStrategy,                                      // 15 (New)
-      form.endgameAction,                                        // 16
-      form.climbTime || "0",                                     // 17 (New)
-      form.incapacitated ? 'DIE' : 'OK',                         // 18 (New)
-      fullNotes                                                  // 19 (Notes)
+      form.endgameAction,                                        // 14
+      form.climbTime || "0",                                     // 15 (New)
+      form.incapacitated ? 'DIE' : 'OK',                         // 16 (New)
+      fullNotes                                                  // 17 (Notes)
     ].join('|');
 
     // Attempt to submit to backend real-time
@@ -794,7 +793,7 @@ export default function App() {
         hubMisses: form.teleMiss,
         level: 0,
         climbFailed: false,
-        defended: form.defenseStrategy !== 'None',
+        defended: false,
         passes: form.teleFerry
       },
       endgame: {
@@ -806,7 +805,7 @@ export default function App() {
 
     try {
       if (token) {
-        const res = await fetch(`${API_URL}/report`, {
+        const res = await fetch(`${apiUrl}/report`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -915,6 +914,63 @@ export default function App() {
               </View>
             </View>
             
+            <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
+              <Text style={styles.label}>Backend API URL</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>e.g. http://192.168.1.55:8000</Text>
+              <TextInput
+                style={[styles.input, { marginBottom: 10 }]}
+                placeholder='http://...'
+                placeholderTextColor="#666"
+                autoCapitalize='none'
+                value={apiUrlInput}
+                onChangeText={setApiUrlInput}
+              />
+              <TouchableOpacity
+                style={{ backgroundColor: '#ff9500', padding: 10, borderRadius: 8, alignItems: 'center' }}
+                onPress={async () => {
+                  let cleaned = apiUrlInput.trim();
+                  // Remove trailing slash if present
+                  if (cleaned.endsWith('/')) cleaned = cleaned.slice(0, -1);
+                  setApiUrl(cleaned);
+                  setApiUrlInput(cleaned);
+                  await AsyncStorage.setItem('@api_url', cleaned);
+                  Alert.alert("Success", "API URL Updated!");
+                }}
+              >
+                <Text style={{ color: 'white', fontWeight: 'bold' }}>Save API URL</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
+              <Text style={styles.label}>Load Match Schedule</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Paste JSON: {"{'1':{'Red1':'123'...}}"}</Text>
+              <TextInput
+                style={[styles.input, { height: 60, marginBottom: 10 }]}
+                placeholder='Paste Schedule JSON here...'
+                placeholderTextColor="#666"
+                multiline
+                numberOfLines={3}
+                value={scheduleInput}
+                onChangeText={setScheduleInput}
+              />
+              <TouchableOpacity
+                style={{ backgroundColor: '#ff9500', padding: 10, borderRadius: 8, alignItems: 'center' }}
+                onPress={async () => {
+                  try {
+                    const parsed = JSON.parse(scheduleInput);
+                    setSchedule(parsed);
+                    await AsyncStorage.setItem('@match_schedule', scheduleInput);
+                    setScheduleInput('');
+                    Alert.alert("Success", "Schedule Loaded!");
+                  } catch (e) {
+                    Alert.alert("Error", "Invalid JSON format.");
+                  }
+                }}
+              >
+                <Text style={{ color: 'white', fontWeight: 'bold' }}>Save Schedule</Text>
+              </TouchableOpacity>
+            </View>
+            
             <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444' }]} onPress={() => setIsSettingsOpen(false)}>
               <Text style={styles.closeBtnText}>Close Settings</Text>
             </TouchableOpacity>
@@ -1013,6 +1069,7 @@ export default function App() {
           onBack={() => setCurrentView('dashboard')} 
           username={username}
           token={token} 
+          apiUrl={apiUrl}
         />
       )}
     </SafeAreaView>
