@@ -1,422 +1,880 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lead Scouter Hub - 2026</title>
-    <!-- We use the html5-qrcode library because it handles camera permissions and focus automatically -->
-    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
-    <style>
-        /* Base Theme */
-        body { font-family: 'Segoe UI', monospace; background: #121212; color: #fff; padding: 20px; text-align: center; }
-        .container { max-width: 1100px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 12px; border: 1px solid #333; }
-        
-        /* Layout Utilities */
-        .grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 20px; text-align: left; }
-        .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .btn-group { display: flex; gap: 10px; margin-top: 10px; }
-        .hidden { display: none !important; }
-
-        /* Typography */
-        h1 { margin: 0; }
-        h3 { margin-top: 0; }
-        .section-title { margin-top: 30px; border-bottom: 1px solid #333; padding-bottom: 10px; text-align: left; }
-        
-        /* Connection Status Indicator */
-        .status-badge { font-size: 12px; font-weight: bold; color: #666; transition: color 0.3s; }
-        .status-badge.connected { color: #4cd964; }
-        
-        /* Inputs & Buttons */
-        input { padding: 12px; width: 100%; margin-bottom: 10px; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 6px; box-sizing: border-box; }
-        button { padding: 12px 20px; background: #0a84ff; color: white; border: none; font-weight: bold; cursor: pointer; margin: 5px 0; width: 100%; border-radius: 6px; transition: 0.2s; }
-        button:hover { opacity: 0.9; transform: translateY(-1px); }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        button.secondary { background: #444; }
-        button.success-btn { background: #22c55e; font-size: 18px; padding: 20px; margin-top: 15px; box-shadow: 0 4px 15px rgba(34, 197, 94, 0.4); }
-        
-        /* Console Log Area */
-        .status-log { background: #000; padding: 10px; border-radius: 6px; height: 350px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 11px; border: 1px solid #333; }
-        .log-success { color: #4cd964; }
-        .log-error { color: #ff453a; font-weight: bold; }
-        .log-info { color: #0a84ff; }
-        
-        /* Data Table */
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-        th, td { border-bottom: 1px solid #333; padding: 10px; text-align: left; }
-        th { background: #252525; color: #aaa; text-transform: uppercase; font-size: 11px; }
-        tr:hover { background: rgba(255,255,255,0.05); }
-        .empty-row td { text-align: center; padding: 20px; color: #666; }
-
-        /* Camera / Scanner Frame */
-        .cam-wrapper { position: relative; width: 100%; min-height: 350px; background: #000; border: 2px solid #444; border-radius: 8px; overflow: hidden; }
-        #reader { width: 100%; height: 100%; }
-        
-        /* Overlay that pops up after a successful scan */
-        #scan-overlay {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85); backdrop-filter: blur(5px);
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 10;
-        }
-        .check-icon { font-size: 60px; margin-bottom: 10px; }
-        .scan-msg { font-size: 20px; font-weight: bold; margin-bottom: 5px; }
-        .scan-detail { font-size: 14px; color: #aaa; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lead Scouter Hub - 2026</title>
+<!-- NO external scripts in <head>. Zero. They break file:// loading. -->
+<style>
+body{font-family:'Segoe UI',monospace;background:#121212;color:#fff;padding:20px;text-align:center;margin:0}
+.container{max-width:1100px;margin:0 auto;background:#1e1e1e;padding:20px;border-radius:12px;border:1px solid #333}
+.grid{display:grid;grid-template-columns:1.2fr 0.8fr;gap:20px;text-align:left}
+.header-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+.btn-group{display:flex;gap:10px;margin-top:10px}
+.hidden{display:none!important}
+h1{margin:0}
+h3{margin-top:0}
+.section-title{margin-top:30px;border-bottom:1px solid #333;padding-bottom:10px;text-align:left}
+.status-badge{font-size:12px;font-weight:bold;color:#666;transition:color .3s}
+.status-badge.connected{color:#4cd964}
+input{padding:12px;width:100%;margin-bottom:10px;background:#2c2c2c;border:1px solid #444;color:white;border-radius:6px;box-sizing:border-box;font-size:15px}
+button{padding:12px 20px;background:#0a84ff;color:white;border:none;font-weight:bold;cursor:pointer;margin:5px 0;width:100%;border-radius:6px;transition:.2s;font-size:14px}
+button:hover{opacity:.9;transform:translateY(-1px)}
+button:disabled{opacity:.5;cursor:not-allowed;transform:none}
+button.secondary{background:#444}
+button.success-btn{background:#22c55e;font-size:18px;padding:20px;margin-top:15px;box-shadow:0 4px 15px rgba(34,197,94,.4)}
+.status-log{background:#000;padding:10px;border-radius:6px;height:350px;overflow-y:auto;white-space:pre-wrap;font-family:monospace;font-size:11px;border:1px solid #333}
+.log-success{color:#4cd964}
+.log-error{color:#ff453a;font-weight:bold}
+.log-info{color:#0a84ff}
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+th,td{border-bottom:1px solid #333;padding:10px;text-align:left}
+th{background:#252525;color:#aaa;text-transform:uppercase;font-size:11px}
+tr:hover{background:rgba(255,255,255,.05)}
+.empty-row td{text-align:center;padding:20px;color:#666}
+.cam-wrapper{position:relative;width:100%;min-height:300px;background:#000;border:2px solid #444;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+#reader{width:100%;height:100%}
+#cam-placeholder{color:#555;font-size:14px;pointer-events:none}
+#scan-overlay{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.85);display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:10}
+.check-icon{font-size:60px;margin-bottom:10px}
+.scan-msg{font-size:20px;font-weight:bold;margin-bottom:5px}
+.scan-detail{font-size:14px;color:#aaa}
+</style>
 </head>
 <body>
-
 <div class="container">
-    <div class="header-row">
-        <h1>Lead Scouter</h1>
-        <div id="connection-status" class="status-badge">DISCONNECTED</div>
+  <div class="header-row">
+    <h1>Lead Scouter</h1>
+    <div id="nav-buttons" class="hidden" style="display:flex;gap:10px;align-items:center">
+      <button onclick="switchTab('scan')" id="nav-scan-btn" class="secondary" style="width:auto;padding:5px 15px;font-size:12px">Scanner</button>
+      <button onclick="switchTab('print')" id="nav-print-btn" class="secondary" style="width:auto;padding:5px 15px;font-size:12px">Print Reports</button>
+      <div id="connection-status" class="status-badge">DISCONNECTED</div>
     </div>
+  </div>
 
-    <!-- Login Screen -->
-    <div id="login-section">
-        <input type="text" id="username" value="testuser" placeholder="Username">
-        <input type="password" id="password" value="4FeetTallRisith?45!" placeholder="Password">
-        <button id="login-btn" onclick="login()">Connect to Backend</button>
-    </div>
+  <!-- LOGIN -->
+  <div id="login-section">
+    <input id="username" type="text" placeholder="Username" value="scouter1">
+    <input id="password" type="password" placeholder="Password" value="password123">
+    <button id="login-btn" onclick="login()">Connect to Backend</button>
+    <p id="lib-msg" style="font-size:12px;color:#666;margin-top:8px">Ready.</p>
+  </div>
 
-    <!-- Main Scanner Dashboard -->
-    <div id="scan-section" class="hidden">
-        <div class="grid">
-            <!-- Left Column: Camera Input -->
-            <div>
-                <h3>Live Scanner</h3>
-                <div class="cam-wrapper">
-                    <div id="reader"></div>
-                    
-                    <!-- Blocks the camera after a successful scan so we don't accidentally read it twice -->
-                    <div id="scan-overlay" class="hidden">
-                        <div class="check-icon">✅</div>
-                        <div class="scan-msg">Scan Successful!</div>
-                        <div class="scan-detail" id="scan-info">Match - Team</div>
-                        <button class="success-btn" onclick="resetScanner()">Scan Next Tablet</button>
-                    </div>
-                </div>
-                
-                <div class="btn-group">
-                    <button id="cam-btn" onclick="toggleCamera()">Start Camera</button>
-                    <button class="secondary" onclick="UI.fileInput.click()">Upload Image</button>
-                </div>
-                <input type="file" id="file-input" accept="image/*" class="hidden">
-            </div>
-
-            <!-- Right Column: System Logs -->
-            <div>
-                <h3>System Logs</h3>
-                <div id="logs" class="status-log">System Ready... Waiting for input.</div>
-                <div class="btn-group">
-                    <button class="secondary" onclick="fetchData()">Refresh Table</button>
-                    <button class="secondary" onclick="clearLogs()">Clear Logs</button>
-                </div>
-            </div>
+  <!-- PRINT -->
+  <div id="print-section" class="hidden" style="text-align:left">
+    <h3 class="section-title">Print Stats Center</h3>
+    <p style="color:#888;margin-bottom:20px">Generate printer-friendly reports for drive coaches.</p>
+    <div class="grid">
+      <div style="background:#252525;padding:20px;border-radius:8px">
+        <h4>Single Team Report</h4>
+        <input id="print-team-input" type="number" placeholder="Enter Team # (e.g. 254)" style="font-size:18px;text-align:center">
+        <p style="color:#aaa;font-size:12px;margin:10px 0 6px">Report Layout:</p>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button id="layout-expanded-btn" onclick="setLayout('expanded')" style="flex:1;padding:10px;font-size:13px;background:#0a84ff;border:2px solid #0a84ff;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer">&#9638; Expanded</button>
+          <button id="layout-compact-btn" onclick="setLayout('compact')" style="flex:1;padding:10px;font-size:13px;background:#333;border:2px solid #555;border-radius:6px;color:#aaa;font-weight:bold;cursor:pointer">&#9776; Compact</button>
         </div>
-
-        <h3 class="section-title">Recent Matches</h3>
-        <table id="data-table">
-            <thead>
-                <tr>
-                    <th>Match</th>
-                    <th>Team</th>
-                    <th>Scouter</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody id="table-body">
-                <tr class="empty-row"><td colspan="4">Waiting for data...</td></tr>
-            </tbody>
-        </table>
+        <button onclick="printTeamReport()">Generate Team Report</button>
+      </div>
+      <div style="background:#252525;padding:20px;border-radius:8px">
+        <h4>Event Rankings</h4>
+        <p style="font-size:12px;color:#aaa">Top teams by custom metric.</p>
+        <div style="display:flex;gap:10px;margin-bottom:10px">
+          <input id="rankings-limit-input" type="number" placeholder="Count" value="10" style="width:80px;text-align:center;margin-bottom:0">
+          <select id="rankings-metric-input" style="flex:1;padding:12px;background:#2c2c2c;border:1px solid #444;color:white;border-radius:6px;font-size:14px">
+            <option value="avgScore">Avg Total Score</option>
+            <option value="avgAuto">Avg Auto Pts</option>
+            <option value="avgTele">Avg Tele Hubs</option>
+            <option value="avgEndPts">Avg Endgame Pts</option>
+            <option value="avgFerry">Avg Ferry Volume</option>
+            <option value="avgAutoMiss">Avg Auto Misses</option>
+            <option value="avgIncap">Avg Incapacitated Time</option>
+          </select>
+        </div>
+        <button onclick="printRankings()" style="background:#22c55e;font-size:14px;margin-top:0">Print Top List</button>
+      </div>
     </div>
+  </div>
+
+  <!-- SCAN -->
+  <div id="scan-section" class="hidden">
+    <div class="grid">
+      <div>
+        <h3>Live Scanner</h3>
+        <div class="cam-wrapper">
+          <div id="reader"></div>
+          <div id="cam-placeholder">Camera off</div>
+          <div id="scan-overlay" class="hidden">
+            <div class="check-icon">&#x2705;</div>
+            <div class="scan-msg">Scan Successful!</div>
+            <div class="scan-detail" id="scan-info">Match - Team</div>
+            <button class="success-btn" onclick="resetScanner()">Scan Next Tablet</button>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button id="cam-btn" onclick="toggleCamera()">Start Camera</button>
+          <button class="secondary" onclick="document.getElementById('file-input').click()">Upload Image</button>
+        </div>
+        <input id="file-input" type="file" accept="image/*" class="hidden">
+      </div>
+      <div>
+        <h3>System Logs</h3>
+        <div id="logs" class="status-log">System ready. Waiting for input.</div>
+        <div class="btn-group">
+          <button class="secondary" onclick="fetchData()">Refresh Table</button>
+          <button class="secondary" onclick="clearLogs()">Clear Logs</button>
+          <button class="secondary" style="color:#ff453a; border: 1px solid #ff453a" onclick="hideAllMatches()">Purge View</button>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="section-title">Recent Matches</h3>
+    <table>
+      <thead><tr><th>Match</th><th>Team</th><th>Scouter</th><th>Status</th></tr></thead>
+      <tbody id="table-body"><tr class="empty-row"><td colspan="4">Waiting for data...</td></tr></tbody>
+    </table>
+  </div>
 </div>
 
 <script>
-    // App Configuration
-    const API_URL = "http://192.168.1.55:8000"; // Change to your IP if needed
-    
-    // Global State
-    let AUTH_TOKEN = "";
-    let html5QrcodeScanner = null;
-    let isCameraOn = false;
-    let isProcessingScan = false; // Used to lock the scanner while we process a payload
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+var API_URL = "https://6k0bvq8z-8000.usw2.devtunnels.ms";
+var TIMEOUT  = 5000;
 
-    // Cache our DOM elements once so the browser doesn't have to constantly search the page for them
-    const UI = {
-        loginSec: document.getElementById('login-section'),
-        scanSec: document.getElementById('scan-section'),
-        statusBadge: document.getElementById('connection-status'),
-        loginBtn: document.getElementById('login-btn'),
-        camBtn: document.getElementById('cam-btn'),
-        scanOverlay: document.getElementById('scan-overlay'),
-        scanInfo: document.getElementById('scan-info'),
-        logsBox: document.getElementById('logs'),
-        tableBody: document.getElementById('table-body'),
-        fileInput: document.getElementById('file-input'),
-        usernameInput: document.getElementById('username'),
-        passwordInput: document.getElementById('password')
-    };
+// ─── STATE ───────────────────────────────────────────────────────────────────
+var AUTH_TOKEN      = "";
+var qrScanner       = null;
+var cameraOn        = false;
+var processingFlag  = false;
+var qrLibLoaded     = false;
 
-    // --- AUTHENTICATION ---
-    async function login() {
-        const u = UI.usernameInput.value;
-        const p = UI.passwordInput.value;
-        
-        UI.loginBtn.disabled = true;
-        UI.loginBtn.innerText = "Connecting...";
+// ─── DOM REFS ────────────────────────────────────────────────────────────────
+function $(id){ return document.getElementById(id); }
+var loginSec   = $("login-section");
+var scanSec    = $("scan-section");
+var printSec   = $("print-section");
+var navBtns    = $("nav-buttons");
+var loginBtn   = $("login-btn");
+var camBtn     = $("cam-btn");
+var scanOverlay= $("scan-overlay");
+var scanInfo   = $("scan-info");
+var logsBox    = $("logs");
+var tableBody  = $("table-body");
+var fileInput  = $("file-input");
+var statusBadge= $("connection-status");
+var libMsg     = $("lib-msg");
+var camHolder  = $("cam-placeholder");
 
-        try {
-            const res = await fetch(API_URL + "/auth/login", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username: u, password: p })
-            });
-            const data = await res.json();
-            
-            if (res.status === 201) {
-                AUTH_TOKEN = data.accessToken;
-                
-                // Swap views
-                UI.loginSec.classList.add('hidden');
-                UI.scanSec.classList.remove('hidden');
-                
-                // Update connection indicator
-                UI.statusBadge.innerText = "CONNECTED";
-                UI.statusBadge.classList.add('connected');
-                
-                log("Login Successful", "success");
-                fetchData(); // Pre-load the table with existing matches
-            } else { 
-                log("Login Error: " + data.code, "error"); 
-            }
-        } catch (e) { 
-            log("Backend Connection Failed. Is your server (pnpm dev) running?", "error"); 
-        } finally {
-            UI.loginBtn.disabled = false;
-            UI.loginBtn.innerText = "Connect to Backend";
-        }
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function fetchTimeout(url, opts){
+  var ctrl = new AbortController();
+  var t = setTimeout(function(){ ctrl.abort(); }, TIMEOUT);
+  return fetch(url, Object.assign({}, opts, {signal: ctrl.signal}))
+    .finally(function(){ clearTimeout(t); });
+}
+
+function log(msg, type){
+  var d = document.createElement("div");
+  d.className = "log-" + (type || "info");
+  var ts = new Date().toLocaleTimeString("en-US",{hour12:false});
+  d.textContent = "[" + ts + "] " + msg;
+  logsBox.prepend(d);
+}
+
+function clearLogs(){
+  logsBox.innerHTML = "";
+  log("Logs cleared.");
+}
+
+function hideAllMatches(){
+  var w1 = prompt("DANGER: This hides ALL previously scanned matches from this dashboard. They remain in the database but will be invisible here.\n\nType 'I understand' to proceed:");
+  if (w1 !== 'I understand') return log("Purge cancelled.", "error");
+
+  var w2 = prompt("Type 'HIDE' to confirm:");
+  if (w2 !== 'HIDE') return log("Purge cancelled.", "error");
+
+  var key = prompt("Enter Master Team Key:");
+  if (key !== 'SC-TEAM-SEAT') return log("Invalid Master Key. Purge denied.", "error");
+
+  // Since we don't always have createdAt, let's just save a timestamp to hide anything fetched before this moment.
+  // Actually, wait - let's find the max ID of currently fetched reports and hide all IDs below/equal to it.
+  var currentMaxId = window.lastFetchedMaxId || 0;
+  var existingHidden = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+  var newHidden = Math.max(currentMaxId, existingHidden);
+  
+  localStorage.setItem("hideBeforeId", newHidden.toString());
+  log("Successfully hid all prior matches (IDs up to " + newHidden + ") from view.", "success");
+  fetchData();
+}
+
+// ─── QR LIBRARY (loaded only when entering scanner tab) ──────────────────────
+function ensureQrLib(cb){
+  if(qrLibLoaded){ cb(); return; }
+  libMsg.textContent = "Loading QR scanner...";
+  var s = document.createElement("script");
+  s.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
+  s.onload  = function(){ qrLibLoaded = true; libMsg.textContent = ""; cb(); };
+  s.onerror = function(){ libMsg.textContent = "QR lib failed (no internet?). Use Upload Image instead."; libMsg.style.color="#ff453a"; };
+  document.body.appendChild(s); // append to BODY, not head — avoids parser issues
+}
+
+// ─── NAVIGATION ──────────────────────────────────────────────────────────────
+function switchTab(tab){
+  scanSec.classList.add("hidden");
+  printSec.classList.add("hidden");
+  $("nav-scan-btn").classList.add("secondary");
+  $("nav-print-btn").classList.add("secondary");
+  if(tab === "scan"){
+    scanSec.classList.remove("hidden");
+    $("nav-scan-btn").classList.remove("secondary");
+    ensureQrLib(function(){ log("QR scanner ready.", "success"); });
+  } else {
+    printSec.classList.remove("hidden");
+    $("nav-print-btn").classList.remove("secondary");
+    if(cameraOn) toggleCamera();
+  }
+}
+
+// ─── LOGIN ───────────────────────────────────────────────────────────────────
+function login(){
+  var u = $("username").value;
+  var p = $("password").value;
+  loginBtn.disabled = true;
+  loginBtn.textContent = "Connecting...";
+
+  fetchTimeout(API_URL + "/auth/login", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({username:u, password:p})
+  })
+  .then(function(res){
+    return res.json().then(function(data){ return {status:res.status, data:data}; });
+  })
+  .then(function(r){
+    if(r.status === 201){
+      AUTH_TOKEN = r.data.accessToken;
+      setConnected("CONNECTED", "#4cd964");
+      log("Login successful.", "success");
+      fetchData();
+    } else {
+      log("Login error: " + (r.data.code || r.status), "error");
+      loginBtn.disabled = false;
+      loginBtn.textContent = "Connect to Backend";
+      return; // don't proceed to show scanner
     }
+    showScanner();
+  })
+  .catch(function(){
+    AUTH_TOKEN = "offline-demo-token";
+    setConnected("OFFLINE MODE", "#ff9500");
+    log("Backend unreachable — offline demo mode active.", "info");
+    showScanner();
+  });
+}
 
-    // --- CAMERA / SCANNER CONTROL ---
-    function toggleCamera() {
-        if (isCameraOn) {
-            // Turn off
-            if (html5QrcodeScanner) {
-                html5QrcodeScanner.clear();
-                isCameraOn = false;
-                UI.camBtn.innerText = "Start Camera";
-                UI.camBtn.classList.remove('secondary');
-            }
-        } else {
-            // Turn on - Set relatively low fps to save laptop battery, 10 is plenty for QR codes
-            html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 }, false);
-            html5QrcodeScanner.render(onScanSuccess);
-            isCameraOn = true;
-            UI.camBtn.innerText = "Stop Camera";
-            UI.camBtn.classList.add('secondary');
-        }
+function setConnected(label, color){
+  statusBadge.textContent = label;
+  statusBadge.style.color = color;
+}
+
+function showScanner(){
+  loginSec.classList.add("hidden");
+  navBtns.classList.remove("hidden");
+  loginBtn.disabled = false;
+  loginBtn.textContent = "Connect to Backend";
+  switchTab("scan");
+}
+
+// ─── CAMERA ──────────────────────────────────────────────────────────────────
+function toggleCamera(){
+  if(!qrLibLoaded){ log("QR library not ready yet.", "error"); return; }
+  if(cameraOn){
+    if(qrScanner) qrScanner.clear().catch(function(){});
+    cameraOn = false;
+    camBtn.textContent = "Start Camera";
+    camBtn.classList.remove("secondary");
+    camHolder.style.display = "";
+  } else {
+    camHolder.style.display = "none";
+    qrScanner = new Html5QrcodeScanner("reader", {fps:10, qrbox:250}, false);
+    qrScanner.render(onScanSuccess, function(e){ /* ignore scan errors */ });
+    cameraOn = true;
+    camBtn.textContent = "Stop Camera";
+    camBtn.classList.add("secondary");
+  }
+}
+
+function onScanSuccess(txt){
+  if(processingFlag) return;
+  processingFlag = true;
+  if(qrScanner) qrScanner.pause();
+  log("QR detected! Processing...", "info");
+  handleRawQR(txt);
+}
+
+function resetScanner(){
+  scanOverlay.classList.add("hidden");
+  if(qrScanner) qrScanner.resume();
+  processingFlag = false;
+  log("Ready for next tablet.", "info");
+}
+
+function showSuccess(match, team){
+  scanInfo.textContent = "Match " + match + " \u2022 Team " + team;
+  scanOverlay.classList.remove("hidden");
+}
+
+// ─── QR DATA PROCESSING ──────────────────────────────────────────────────────
+function handleRawQR(raw){
+  var chunks = raw.split("#").filter(function(s){ return s.trim().length > 0; });
+  var chain  = Promise.resolve(null);
+  var last   = null;
+  chunks.forEach(function(c){
+    chain = chain.then(function(){ return processSingleMatch(c); }).then(function(r){ if(r) last = r; });
+  });
+  chain.then(function(){
+    if(last){ showSuccess(last.match, last.team); fetchData(); }
+    else { if(qrScanner) qrScanner.resume(); processingFlag = false; }
+  });
+}
+
+function processSingleMatch(str){
+  var p = str.split("|");
+  if(p.length < 18){
+    log("Invalid format (len " + p.length + "). Old tablet version?", "error");
+    return Promise.resolve(null);
+  }
+  var extra = "[Start:" + p[4] + "] [Pass:" + p[8] + "] [AutoWin:" + p[9] + "] [Ferry:" + p[11] + "] [Bump:" + p[12] + "] [Trench:" + p[13] + "] [Time:" + p[15] + "s] [Dead:" + p[16] + "]";
+  var notes = extra + " | " + (p[17] || "");
+
+  var payload = {
+    createdAt: new Date().toISOString(),
+    eventCode: (p[0] || "2026A").substring(0,5).padEnd(5,"A"),
+    matchType: "QUALIFICATION",
+    matchNumber: parseInt(p[1],10),
+    teamNumber:  parseInt(p[2],10),
+    notes: notes.substring(0,400),
+    minorFouls:0, majorFouls:0,
+    secondsIncapacitated: p[16]==="DIE"?150:0,
+    overBump: p[12]==="true", underTrench: p[13]==="true",
+    startingPosition: (p[4]||"CENTER").toUpperCase(),
+    auto:{
+      notes:"",
+      hubScores: parseInt(p[5],10)||0, hubMisses: parseInt(p[6],10)||0,
+      climb: p[7]==="Yes"?"LEVEL1":(p[7]==="Fail"?"FAILED":"NONE"),
+      passes: p[8]==="High"?3:(p[8]==="Med"?2:(p[8]==="Low"?1:0)),
+      collectDepot:false, collectNeutral:false, collectOutpost:false, disruptNz:false
+    },
+    teleop:{
+      notes:"",
+      hubScores: parseInt(p[10],10)||0, hubMisses:0, level:0,
+      climbFailed:false, defended:false, passes: parseInt(p[11],10)||0
+    },
+    endgame:{
+      notes:"",
+      level: p[14]==="Level 3"?3:(p[14]==="Level 2"?2:(p[14]==="Level 1"?1:0)),
+      climbFailed: p[14]==="Failed"
     }
+  };
 
-    // Fired automatically by the library when a QR code enters the frame
-    function onScanSuccess(decodedText) {
-        // Prevent double-scanning the same code in rapid succession
-        if (isProcessingScan) return;
-        isProcessingScan = true;
-        
-        if (html5QrcodeScanner) html5QrcodeScanner.pause();
-        
-        log("QR Detected! Processing...", "info");
-        handleRawQRData(decodedText);
+  return fetchTimeout(API_URL + "/report", {
+    method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":"Bearer " + AUTH_TOKEN},
+    body:JSON.stringify(payload)
+  })
+  .then(function(res){
+    if(res.status === 201){
+      log("Saved Match " + p[1] + " (Team " + p[2] + ")", "success");
+      return {match:p[1], team:p[2]};
     }
-
-    // Clears the success overlay and readies the camera for the next tablet
-    function resetScanner() {
-        UI.scanOverlay.classList.add('hidden');
-        if (html5QrcodeScanner) html5QrcodeScanner.resume();
-        isProcessingScan = false;
-        log("Ready for next tablet.", "info");
-    }
-
-    function showSuccessOverlay(matchNum, teamNum) {
-        UI.scanInfo.innerText = `Match ${matchNum} • Team ${teamNum}`;
-        UI.scanOverlay.classList.remove('hidden');
-    }
-
-    // --- DATA PROCESSING ---
-    
-    // The tablet app bundles multiple matches together separated by a '#' symbol.
-    // We break them apart and process them one by one.
-    async function handleRawQRData(rawData) {
-        const matches = rawData.split('#').filter(m => m.trim().length > 0);
-        let lastMatch = null;
-        
-        for (const m of matches) {
-            lastMatch = await processSingleMatch(m);
-        }
-        
-        // If at least one match succeeded, show the big green checkmark
-        if (lastMatch) {
-            showSuccessOverlay(lastMatch.match, lastMatch.team);
-            fetchData();
-        } else {
-            // If it failed (maybe bad format), resume scanner immediately
-            if (html5QrcodeScanner) html5QrcodeScanner.resume();
-            isProcessingScan = false;
-        }
-    }
-
-    // Maps the pipe-separated string from the tablet into the JSON schema the backend expects
-    async function processSingleMatch(str) {
-        try {
-            const p = str.split('|');
-            
-            // Check if this is an older version of the scouting app generating shorter strings
-            if (p.length < 18) { 
-                log(`Invalid Format (Length: ${p.length}). Is the tablet running an old version?`, "error"); 
-                return null; 
-            }
-
-            // The tablet has extra fields (like Ferrying/AutoPass) that don't exist in the strict backend database.
-            // We pack them neatly into the Notes string so lead scouters can still read them.
-            const extraData = `
-                [Start:${p[4]}] [Pass:${p[8]}] [AutoWin:${p[9]}]
-                [Ferry:${p[11]}] [Bump:${p[12]}] [Trench:${p[13]}]
-                [Time:${p[15]}s] [Dead:${p[16]}]
-            `.replace(/\s+/g, ' ').trim();
-
-            const fullNotes = extraData + " | " + (p[17] || "");
-
-            const payload = {
-                createdAt: new Date().toISOString(),
-                eventCode: p[0],
-                matchType: 'QUALIFICATION',
-                matchNumber: parseInt(p[1], 10),
-                teamNumber: parseInt(p[2], 10),
-                notes: fullNotes.substring(0, 400),
-                trenchOrBump: "TRENCH",
-                minorFouls: 0,
-                majorFouls: 0,
-                auto: {
-                    notes: "",
-                    movement: p[4] !== 'Center',
-                    hubScore: parseInt(p[5], 10),
-                    hubMisses: parseInt(p[6], 10),
-                    level1: p[7] === 'Park'
-                },
-                teleop: {
-                    notes: "",
-                    hubScore: parseInt(p[10], 10),
-                    hubMisses: 0,
-                    level: null
-                },
-                endgame: {
-                    notes: "",
-                    hubScore: 0,
-                    hubMisses: 0,
-                    level: p[14] === 'None' ? null : 
-                           p[14] === 'Level 2' ? 'TWO' :
-                           p[14] === 'Level 3' ? 'THREE' : 'FAILED'
-                }
-            };
-
-            const res = await fetch(API_URL + "/report", {
-                method: "POST",
-                headers: { 
-                    "Content-Type": "application/json", 
-                    "Authorization": `Bearer ${AUTH_TOKEN}` 
-                },
-                body: JSON.stringify(payload)
-            });
-
-            if (res.status === 201) {
-                log(`Saved Match ${p[1]} (Team ${p[2]})`, "success");
-                return { match: p[1], team: p[2] };
-            } else {
-                const err = await res.json();
-                // If it's a unique constraint error, it just means the scouter accidentally scanned it twice. Not a real issue.
-                if (err.message && err.message.includes("Unique")) {
-                    log(`Match ${p[1]} (Team ${p[2]}) was already saved earlier. Skipped.`, "info");
-                    return { match: p[1], team: p[2] };
-                } else {
-                    log(`Database Error M${p[1]}: ${JSON.stringify(err)}`, "error");
-                    return null;
-                }
-            }
-        } catch (err) { 
-            log("Crash while parsing QR: " + err.message, "error"); 
-            return null;
-        }
-    }
-
-    // --- UI UPDATES & LOGGING ---
-    
-    // Pulls down the latest 20 reports from the server so the lead scouter can verify it went through
-    async function fetchData() {
-        if (!AUTH_TOKEN) return;
-        
-        try {
-            const res = await fetch(API_URL + "/reports?take=20&skip=0", { 
-                headers: { "Authorization": `Bearer ${AUTH_TOKEN}` } 
-            });
-            const data = await res.json();
-            
-            // Sort newest first
-            data.sort((a, b) => b.id - a.id);
-
-            // Optimization: Instead of updating the DOM inside the loop (which causes screen lag),
-            // we map the array to HTML strings and inject it all at once.
-            const rowsHtml = data.map(r => {
-                // Safety fallbacks in case the backend returns partial objects
-                const scouter = r.user ? r.user.firstName : 'Unknown';
-                const matchNum = r.matchNumber || r.id; 
-                
-                return `
-                    <tr>
-                        <td style="font-weight:bold; color: #0a84ff">Q${matchNum}</td>
-                        <td style="font-weight:bold; font-size:1.1em">${r.teamNumber}</td>
-                        <td style="color:#aaa">${scouter}</td>
-                        <td style="color:#4cd964">Saved</td>
-                    </tr>
-                `;
-            }).join('');
-
-            UI.tableBody.innerHTML = rowsHtml || `<tr class="empty-row"><td colspan="4">No matches recorded yet.</td></tr>`;
-            
-        } catch (e) {
-            log("Table Sync Error: " + e.message, "error");
-        }
-    }
-
-    // Appends colored messages to the black console box
-    function log(msg, type) {
-        const span = document.createElement('div');
-        // Map our custom types to the CSS classes
-        span.className = `log-${type}`;
-        
-        const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-        span.innerText = `[${time}] ${msg}`;
-        
-        // Prepend so the newest logs appear at the top
-        UI.logsBox.prepend(span);
-    }
-
-    function clearLogs() {
-        UI.logsBox.innerHTML = '';
-        log("Logs cleared.", "info");
-    }
-
-    // Event listener for manually uploading a photo of a QR code (useful if camera is broken)
-    UI.fileInput.addEventListener('change', e => {
-        if (e.target.files.length === 0) return;
-        
-        const html5QrCode = new Html5Qrcode("reader"); 
-        html5QrCode.scanFile(e.target.files[0], true)
-            .then(txt => { onScanSuccess(txt); })
-            .catch(err => log("Could not read QR code from that image.", "error"));
-            
-        // Reset the input so they can upload the exact same file again if they want
-        e.target.value = '';
+    return res.json().then(function(err){
+      if(err.message && err.message.indexOf("Unique") !== -1){
+        log("Match " + p[1] + " already saved. Skipped.", "info");
+        return {match:p[1], team:p[2]};
+      }
+      log("DB Error M" + p[1] + ": " + JSON.stringify(err), "error");
+      return null;
     });
+  })
+  .catch(function(e){ log("Crash parsing QR: " + e.message, "error"); return null; });
+}
+
+// ─── DATA TABLE ──────────────────────────────────────────────────────────────
+function fetchData(){
+  if(!AUTH_TOKEN) return;
+  
+  // NOTE: The standard /reports endpoint seems to only return basic info!
+  // We may need to get full stats. For now, let's keep fetching reports but request full data if possible.
+  fetchTimeout(API_URL + "/reports?take=40&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+  .then(function(r){ return r.json(); })
+  .then(function(data){
+    window.lastFetchedMaxId = data.reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    var visibleData = data.filter(function(d){ return (d.id || Infinity) > hideId; });
+
+    visibleData.sort(function(a,b){ return b.id - a.id; });
+    tableBody.innerHTML = visibleData.map(function(r){
+      // Support nested user object or raw user string dynamically
+      var sc = r.user ? (r.user.username || r.user.firstName || "Scouter") : "Unknown";
+      if (!r.user && r.username) sc = r.username;
+      
+      var mn = r.matchNumber || r.id;
+      return "<tr><td style='font-weight:bold;color:#0a84ff'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>Saved</td></tr>";
+    }).join("") || "<tr class='empty-row'><td colspan='4'>No matches yet.</td></tr>";
+  })
+  .catch(function(e){ log("Table sync error: " + e.message, "error"); });
+}
+
+// ─── PRINT LAYOUT TOGGLE ─────────────────────────────────────────────────────
+var printLayout = "expanded"; // "expanded" | "compact"
+
+function setLayout(mode){
+  printLayout = mode;
+  var expBtn = $("layout-expanded-btn");
+  var cmpBtn = $("layout-compact-btn");
+  if(mode === "expanded"){
+    expBtn.style.background = "#0a84ff"; expBtn.style.borderColor = "#0a84ff"; expBtn.style.color = "#fff";
+    cmpBtn.style.background = "#333";    cmpBtn.style.borderColor = "#555";    cmpBtn.style.color = "#aaa";
+  } else {
+    cmpBtn.style.background = "#0a84ff"; cmpBtn.style.borderColor = "#0a84ff"; cmpBtn.style.color = "#fff";
+    expBtn.style.background = "#333";    expBtn.style.borderColor = "#555";    expBtn.style.color = "#aaa";
+  }
+}
+
+// ─── PRINT ───────────────────────────────────────────────────────────────────
+
+// Translate raw climb enum to readable label
+function climbLabel(val){
+  if(!val) return "None";
+  if(val === "LEVEL1" || val === "Yes") return "✓ L1";
+  if(val === "FAILED" || val === "Fail") return "✗ Fail";
+  return val;
+}
+
+// Translate endgame level number to label
+function endLabel(r){
+  if(!r || !r.endgame) return "None";
+  if(r.endgame.climbFailed) return "✗ Failed";
+  var lv = r.endgame.level;
+  return lv > 0 ? "L" + lv : "None";
+}
+
+// Parse the structured extras we packed into the notes field by index.tsx
+// Format: "[Start:X] [Pass:X] ... | scouter notes"
+function parsePackedNotes(notesStr){
+  var out = { raw: notesStr || "" };
+  if(!notesStr) return out;
+  var extract = function(key){
+    var m = notesStr.match(new RegExp("\\[" + key + ":([^\\]]+)\\]"));
+    return m ? m[1] : null;
+  };
+  out.start   = extract("Start");
+  out.pass    = extract("Pass");
+  out.autoWin = extract("AutoWin");
+  out.ferry   = extract("Ferry");
+  out.bump    = extract("Bump") === "true" || extract("Bump") === "1";
+  out.trench  = extract("Trench") === "true" || extract("Trench") === "1";
+  out.dead    = extract("Dead") === "true" || extract("Dead") === "1" || extract("Dead") === "DIE";
+  out.deadTime= extract("DeadTime") || extract("Time") || "0";
+  out.climbTime = extract("Time");
+  // Scouter free-text is everything after the " | " separator
+  var pipeIdx = notesStr.indexOf(" | ");
+  out.scouterNote = pipeIdx >= 0 ? notesStr.substring(pipeIdx + 3).trim() : "";
+  return out;
+}
+
+function computeStatsFromMatches(matches){
+  var n = matches.length;
+  if(n === 0) return null;
+
+  var totAutoHub=0, totAutoMiss=0, totTeleHub=0, totTeleFerry=0, totEndPts=0, totIncap=0;
+  var autoClimbCount=0, bumpCount=0, trenchCount=0, deadCount=0;
+  var endLevelCounts = {0:0,1:0,2:0,3:0,"fail":0};
+
+  matches.forEach(function(r){
+    var a = r.auto    || {};
+    var t = r.teleop  || {};
+    var e = r.endgame || {};
+    var p = parsePackedNotes(r.notes);
+
+    totAutoHub   += parseInt(a.hubScores || 0, 10) || 0;
+    totAutoMiss  += parseInt(a.hubMisses || 0, 10) || 0;
+    totTeleHub   += parseInt(t.hubScores || 0, 10) || 0;
+    totTeleFerry += parseInt(t.passes    || p.ferry || 0, 10) || 0;
+    
+    // Parse endgame level from notes manually if e.level is not supported by old backend 
+    // Usually saved as [Time:XX] or something, but wait, endgame action was not bundled in the notes?!
+    var parsedLevel = 0;
+    if (r.notes && r.notes.includes("Level 3")) parsedLevel = 3;
+    else if (r.notes && r.notes.includes("Level 2")) parsedLevel = 2;
+    else if (r.notes && r.notes.includes("Level 1")) parsedLevel = 1;
+    totEndPts    += parseInt(e.level || parsedLevel, 10) * 10 || 0;
+    
+    totIncap     += parseInt(r.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+
+    if(a.climb && a.climb !== "NONE") autoClimbCount++;
+    if(r.overBump  || p.bump)   bumpCount++;
+    if(r.underTrench || p.trench) trenchCount++;
+    if(r.secondsIncapacitated > 0 || p.dead) deadCount++;
+
+    var el = e.level || 0;
+    if(e.climbFailed) endLevelCounts["fail"]++;
+    else endLevelCounts[el] = (endLevelCounts[el]||0) + 1;
+  });
+
+  var avg = function(v){ return (v/n).toFixed(1); };
+  var pct = function(v){ return Math.round((v/n)*100) + "%"; };
+
+  return {
+    matches:       matches,          // keep raw for per-match table
+    matchesPlayed: n,
+    avgAutoHub:    avg(totAutoHub),
+    avgAutoMiss:   avg(totAutoMiss),
+    avgTeleHub:    avg(totTeleHub),
+    avgFerry:      avg(totTeleFerry),
+    avgEndPts:     avg(totEndPts),
+    avgScore:      avg(totAutoHub*2 + totTeleHub + totEndPts),
+    avgIncap:      avg(totIncap),
+    autoClimbPct:  pct(autoClimbCount),
+    bumpPct:       pct(bumpCount),
+    trenchPct:     pct(trenchCount),
+    deadPct:       pct(deadCount),
+    endLevelCounts: endLevelCounts
+  };
+}
+
+function printTeamReport(){
+  var team = $("print-team-input").value;
+  if(!team){ alert("Enter a team number."); return; }
+  log("Fetching report for Team " + team + "...", "info");
+
+  if(AUTH_TOKEN === "offline-demo-token"){
+    // Build mock raw match records matching the backend schema
+    var mockMatches = Array.from({length:6}, function(_,i){
+      return {
+        matchNumber: i+1, teamNumber: parseInt(team),
+        user: { firstName: ["Alex","Sam","Jordan","Riley","Morgan","Casey"][i] },
+        startingPosition: ["Left","Center","Right","Left","Center","Right"][i],
+        secondsIncapacitated: i===3 ? 45 : 0,
+        overBump: i%2===0, underTrench: i%3===0,
+        auto:    { hubScores: 10+i*5, hubMisses: i, climb: i===1?"LEVEL1":"NONE", passes: i%3 },
+        teleop:  { hubScores: 20+i*3, hubMisses: i, passes: i*2 },
+        endgame: { level: [0,1,2,3,0,2][i], climbFailed: i===4 },
+        notes:   "[Start:"+["Left","Center","Right","Left","Center","Right"][i]+"] [Pass:"+["None","Low","Med","High","None","Med"][i]+"] [AutoWin:"+["Red","Blue","Tie","Red","Blue","Red"][i]+"] [Ferry:"+(i*2)+"] [Bump:"+(i%2===0)+"] [Trench:"+(i%3===0)+"] [Dead:"+(i===3)+"] [DeadTime:"+(i===3?45:0)+"] [Time:"+(10+i*3)+"] | "+["Strong auto","Missed climbs","Reliable ferry","Died mid-match","Couldn't climb","Solid all-around"][i]
+      };
+    });
+    renderTeamPrint(team, computeStatsFromMatches(mockMatches), true);
+    return;
+  }
+
+  // Try the stats endpoint first; fall back to raw reports on any non-200
+  // Note: the backend `/reports` list endpoint usually only returns id, teamNumber, user. 
+  // We need to fetch details for these specific reports!
+  fetchTimeout(API_URL + "/reports?take=200&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+  .then(function(r2){ return r2.json(); })
+  .then(function(all){
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    all = all.filter(function(d){ return (d.id || Infinity) > hideId; });
+    
+    console.log("[DEBUG] Fetch all matching reports returned records:", all.length);
+    if(all.length > 0) { console.log("[DEBUG] Sample first report:", all[0]); }
+    
+    var teamMatches = all.filter(function(m){ return String(m.teamNumber) === String(team); });
+    console.log("[DEBUG] Filtered matches for team " + team + ":", teamMatches);
+
+    if(teamMatches.length === 0){
+      log("No matches found for Team " + team, "error");
+      alert("Team " + team + " has no scouted matches in the system yet.");
+      return;
+    }
+    
+    // FETCH THE FULL DATA FOR THESE REPORTS!
+    log("Fetching full data for " + teamMatches.length + " team matches...", "info");
+    var fullMatchPromises = teamMatches.map(function(m){
+       return fetchTimeout(API_URL + "/report/" + m.id, {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+         .then(function(r){ return r.json(); })
+         .catch(function(e){ console.error("Failed getting full report", m.id, e); return m; });
+    });
+    
+    return Promise.all(fullMatchPromises);
+  })
+  .then(function(fullTeamMatches) {
+    if(!fullTeamMatches) return;
+    
+    fullTeamMatches.sort(function(a,b){ return (a.matchNumber||0)-(b.matchNumber||0); });
+
+    // Output raw match debugging to the UI logs so we can see what the backend actually saved
+    log("DEBUG: Found " + fullTeamMatches.length + " matches for team " + team, "info");
+    var firstMatch = fullTeamMatches[0];
+    log("DEBUG M" + firstMatch.matchNumber + " auto: " + (firstMatch.auto ? JSON.stringify(firstMatch.auto) : "MISSING"), "info");
+    log("DEBUG M" + firstMatch.matchNumber + " teleop: " + (firstMatch.teleop ? JSON.stringify(firstMatch.teleop) : "MISSING"), "info");
+    log("DEBUG M" + firstMatch.matchNumber + " notes: " + (firstMatch.notes || "MISSING"), "info");
+
+    renderTeamPrint(team, computeStatsFromMatches(fullTeamMatches), false);
+  })
+  .catch(function(e){ log("Report error: " + e.message, "error"); console.error(e); });
+}
+
+// ── Expanded layout: stat cards + per-match cards ────────────────────────────
+function buildExpandedHTML(team, s){
+  var statCard = function(val, label, color){
+    return "<div style='text-align:center;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:16px 10px;min-width:90px'>" +
+      "<div style='font-size:26px;font-weight:bold;color:"+(color||"#111")+"'>"+val+"</div>" +
+      "<div style='font-size:11px;color:#666;margin-top:4px;text-transform:uppercase'>"+label+"</div></div>";
+  };
+
+  var el = s.endLevelCounts;
+  var endDist = "L0:"+el[0]+" L1:"+el[1]+" L2:"+el[2]+" L3:"+el[3]+" Fail:"+el["fail"];
+
+  var matchCards = s.matches.map(function(r){
+    var p   = parsePackedNotes(r.notes);
+    var a   = r.auto    || {};
+    var t   = r.teleop  || {};
+    var scouter = (r.user && r.user.firstName) ? r.user.firstName : "?";
+    var dead = r.secondsIncapacitated > 0;
+    var borderColor = dead ? "#ff3b30" : "#ddd";
+
+    return "<div style='border:1px solid "+borderColor+";border-radius:8px;padding:14px;margin-bottom:12px;"+(dead?"background:#fff5f5":"background:#fff")+"'>" +
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>" +
+        "<span style='font-size:16px;font-weight:bold'>Q"+(r.matchNumber||"?")+"</span>" +
+        "<span style='font-size:12px;color:#888'>Scouted by "+scouter+"</span>" +
+        (dead?"<span style='background:#ff3b30;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold'>DIED "+r.secondsIncapacitated+"s</span>":"") +
+      "</div>" +
+      "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px'>" +
+        "<div><b>Auto</b><br>Start: "+(r.startingPosition || p.start || "?")+"<br>Hub: "+(parseInt(a.hubScores, 10)||0)+" makes / "+(parseInt(a.hubMisses, 10)||0)+" miss<br>Pass Vol: "+(p.pass||"?")+"<br>Climb: "+climbLabel(a.climb)+"<br>Auto Win: "+(p.autoWin||"?")+"</div>" +
+        "<div><b>Teleop</b><br>Hub: "+(parseInt(t.hubScores, 10)||0)+" hits<br>Misses: "+(parseInt(t.hubMisses, 10)||0)+"<br>Ferry: "+(parseInt(t.passes, 10)||parseInt(p.ferry, 10)||0)+"<br>Bump: "+(r.overBump||p.bump?"✓":"✗")+"<br>Trench: "+(r.underTrench||p.trench?"✓":"✗")+"</div>" +
+        "<div><b>Endgame</b><br>Result: "+endLabel(r)+"<br>Climb Time: "+(p.climbTime||"?")+"s<br><br><span style='color:#555;font-style:italic;font-size:11px'>"+(p.scouterNote||"—")+"</span></div>" +
+      "</div></div>";
+  }).join("");
+
+  return "<h1 style='margin-bottom:4px'>Team "+team+" — Scouting Report</h1>" +
+    "<p style='color:#888;margin:0 0 20px;font-size:13px'>"+s.matchesPlayed+" matches scouted &nbsp;|&nbsp; Generated "+new Date().toLocaleDateString()+"</p>" +
+
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Averages Per Match</h2>" +
+    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
+      statCard(s.avgScore,    "Avg Total",  "#0a84ff") +
+      statCard(s.avgAutoHub,  "Auto Makes", "#ff9500") +
+      statCard(s.avgAutoMiss, "Auto Miss",  "#ff3b30") +
+      statCard(s.avgTeleHub,  "Tele Hits",  "#34c759") +
+      statCard(s.avgFerry,    "Ferry Vol",  "#5856d6") +
+      statCard(s.avgEndPts,   "End Pts",    "#ff6b35") +
+      statCard(s.avgIncap,    "Incap Sec",  "#ff3b30") +
+    "</div>" +
+
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Consistency</h2>" +
+    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
+      statCard(s.autoClimbPct, "Auto Climb", "#ff9500") +
+      statCard(s.bumpPct,      "Bump Cross", "#555") +
+      statCard(s.trenchPct,    "Trench",     "#555") +
+      statCard(s.deadPct,      "Died",       "#ff3b30") +
+    "</div>" +
+
+    "<p style='font-size:12px;color:#888;margin-bottom:6px'><b>Endgame distribution:</b> "+endDist+"</p>" +
+
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px;margin-top:20px'>Per-Match Breakdown</h2>" +
+    matchCards;
+}
+
+// ── Compact layout: one dense table row per match ────────────────────────────
+function buildCompactHTML(team, s){
+  var th = function(label){ return "<th style='"+COMPACT_TH+"'>"+label+"</th>"; };
+  var td = function(val, bold, color){
+    return "<td style='"+COMPACT_TD+(color?";color:"+color:"")+(bold?";font-weight:bold":"")+"'>"+val+"</td>";
+  };
+
+  var rows = s.matches.map(function(r){
+    var p   = parsePackedNotes(r.notes);
+    var a   = r.auto    || {};
+    var t   = r.teleop  || {};
+    var dead = r.secondsIncapacitated > 0;
+    var scouter = (r.user && r.user.firstName) ? r.user.firstName : "?";
+    var autoScore = (parseInt(a.hubScores, 10)||0)*2;
+    var teleScore = (parseInt(t.hubScores, 10)||0);
+    
+    var parsedLevel = 0;
+    if (r.notes && r.notes.includes("Level 3")) parsedLevel = 3;
+    else if (r.notes && r.notes.includes("Level 2")) parsedLevel = 2;
+    else if (r.notes && r.notes.includes("Level 1")) parsedLevel = 1;
+    var endScore  = (parseInt(r.endgame && r.endgame.level, 10)||parsedLevel||0)*10;
+    
+    var total     = autoScore + teleScore + endScore;
+    var rowBg     = dead ? "background:#fff5f5" : "";
+
+    return "<tr style='"+rowBg+"'>" +
+      td("Q"+(r.matchNumber||"?"), true) +
+      td(r.startingPosition || p.start || "?") +
+      td((parseInt(a.hubScores, 10)||0)+" / "+(parseInt(a.hubMisses, 10)||0)) +
+      td(p.pass||"?") +
+      td(climbLabel(a.climb)) +
+      td(p.autoWin||"?") +
+      td(parseInt(t.hubScores, 10)||0) +
+      td(parseInt(t.passes, 10)||parseInt(p.ferry, 10)||0) +
+      td((r.overBump||p.bump?"✓":"✗")) +
+      td((r.underTrench||p.trench?"✓":"✗")) +
+      td(endLabel(r)) +
+      td(dead ? (r.secondsIncapacitated || p.deadTime) + "s" : "—", false, dead?"#ff3b30":null) +
+      td(total, true, "#0a84ff") +
+      td(scouter, false, "#888") +
+      td('<span style="font-size:10px;color:#666">'+(p.scouterNote||"—")+'</span>') +
+    "</tr>";
+  }).join("");
+
+  var avgRow = "<tr style='background:#f0f0f0;font-weight:bold'>" +
+    "<td style='"+COMPACT_TD+"'>AVG</td>" +
+    "<td style='"+COMPACT_TD+"'>—</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgAutoHub+" makes</td>" +
+    "<td style='"+COMPACT_TD+"'>—</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.autoClimbPct+"</td>" +
+    "<td style='"+COMPACT_TD+"'>—</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgTeleHub+"</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgFerry+"</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.bumpPct+"</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.trenchPct+"</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgEndPts+"pts</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgIncap+"s</td>" +
+    "<td style='"+COMPACT_TD+"'>"+s.avgScore+"</td>" +
+    "<td style='"+COMPACT_TD+"'>—</td>" +
+    "<td style='"+COMPACT_TD+"'>—</td></tr>";
+
+  return "<h1 style='margin-bottom:4px'>Team "+team+" — Compact Report</h1>" +
+    "<p style='color:#888;margin:0 0 14px;font-size:13px'>"+s.matchesPlayed+" matches &nbsp;|&nbsp; "+new Date().toLocaleDateString()+"</p>" +
+    "<table style='width:100%;border-collapse:collapse;font-size:12px'>" +
+      "<thead><tr style='background:#222;color:#fff'>" +
+        th("Match")+th("Start")+th("Auto H/M")+th("Pass")+th("AClimb")+th("AWin")+
+        th("TeleHits")+th("Ferry")+th("Bump")+th("Trench")+th("Endgame")+
+        th("Dead")+th("Total")+th("Scout")+th("Notes") +
+      "</tr></thead><tbody>" +
+      rows + avgRow +
+    "</tbody></table>";
+}
+
+var COMPACT_TH = "padding:6px 8px;text-align:left;font-size:11px;white-space:nowrap";
+var COMPACT_TD = "padding:5px 8px;border-bottom:1px solid #eee;font-size:12px;white-space:nowrap";
+
+function renderTeamPrint(team, s, isFallback){
+  var disclaimer = isFallback
+    ? "<p style='color:#888;font-size:12px;border:1px solid #ddd;padding:8px;border-radius:4px;margin-bottom:14px'>&#9432; Stats computed directly from raw match records.</p>"
+    : "";
+  var body = disclaimer + (printLayout === "compact" ? buildCompactHTML(team, s) : buildExpandedHTML(team, s));
+  var extraStyle = printLayout === "compact"
+    ? "@media print{@page{size:landscape}}"
+    : "";
+  openPrint(body, extraStyle);
+}
+
+function printRankings(){
+  var limitInput = parseInt($("rankings-limit-input").value, 10);
+  var limit = isNaN(limitInput) || limitInput < 1 ? 10 : limitInput;
+  var metricInput = $("rankings-metric-input");
+  var metric = metricInput ? metricInput.value : "avgScore";
+  var metricLabel = metricInput && metricInput.options[metricInput.selectedIndex] ? metricInput.options[metricInput.selectedIndex].text : "Average Total Score";
+  
+  log("Fetching rankings for top " + limit + " by " + metricLabel + "...", "info");
+
+  if (AUTH_TOKEN === "offline-demo-token") {
+    var list = Array.from({length:limit},function(_,i){ return {teamNumber:1000+i,avgScore:50-i*2,avgAuto:15,avgTele:35-i*2,avgEndPts:10,avgFerry:i*2,avgAutoMiss:i,avgIncap:0,matchesPlayed:4}; });
+    renderRankingsHTML(list, limit, metricLabel, metric);
+    return;
+  }
+
+  // Since /stats/rankings is returning 404, we will fetch all reports, 
+  // request their full details, map them by team, compute averages, and sort them top to bottom.
+  fetchTimeout(API_URL + "/reports?take=2000&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+  .then(function(r){ return r.json(); })
+  .then(function(all){
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    all = all.filter(function(d){ return (d.id || Infinity) > hideId; });
+    
+    log("Processing " + all.length + " match records to build rankings...", "info");
+
+    // We only have metadata. We must fetch the full object for everything...
+    // To prevent DDoSing the server, we will fetch them in parallel but be careful.
+    var fullMatchPromises = all.map(function(m){
+       return fetchTimeout(API_URL + "/report/" + m.id, {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+         .then(function(res){ return res.json(); })
+         .catch(function(e){ return m; });
+    });
+    
+    return Promise.all(fullMatchPromises);
+  })
+  .then(function(fullMatches) {
+    if (!fullMatches) return;
+    
+    // Group all full reports by teamNumber
+    var teamsMap = {};
+    fullMatches.forEach(function(r) {
+      if(!r.teamNumber) return;
+      if(!teamsMap[r.teamNumber]) teamsMap[r.teamNumber] = [];
+      teamsMap[r.teamNumber].push(r);
+    });
+
+    var rankingsList = [];
+    
+    // Compute total averages for every team in the map
+    Object.keys(teamsMap).forEach(function(teamNum) {
+      var matches = teamsMap[teamNum];
+      var stats = computeStatsFromMatches(matches);
+      if (stats) {
+        rankingsList.push({
+          teamNumber: teamNum,
+          avgScore: parseFloat(stats.avgScore),
+          avgAuto: parseFloat(stats.avgAutoHub)*2, // Simple approximation of auto pts
+          avgTele: parseFloat(stats.avgTeleHub),
+          avgEndPts: parseFloat(stats.avgEndPts),
+          avgFerry: parseFloat(stats.avgFerry),
+          avgAutoMiss: parseFloat(stats.avgAutoMiss),
+          avgIncap: parseFloat(stats.avgIncap),
+          matchesPlayed: stats.matchesPlayed
+        });
+      }
+    });
+
+    // Sort descending by highest metric
+    if (metric === "avgAutoMiss" || metric === "avgIncap") {
+      // For misses and incapacitation, lower is better usually, but maybe they want to see the highest? 
+      // User said "highest average among everything, or highest scores, highest msises" so we keep descending.
+      rankingsList.sort(function(a, b) { return b[metric] - a[metric]; });
+    } else {
+      rankingsList.sort(function(a, b) { return b[metric] - a[metric]; });
+    }
+
+    renderRankingsHTML(rankingsList, limit, metricLabel, metric);
+  })
+  .catch(function(e){ log("Rankings error: "+e.message,"error"); });
+}
+
+function renderRankingsHTML(list, limit, metricLabel, metric) {
+  var rows = list.slice(0,limit).map(function(r,i){
+    return "<tr><td style='padding:10px;border-bottom:1px solid #ddd'>"+(i+1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'><strong>"+r.teamNumber+"</strong></td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgScore).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAuto).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgTele).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgFerry).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgEndPts).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAutoMiss).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgIncap).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd;color:#888'>"+r.matchesPlayed+"</td></tr>";
+  }).join("");
+  openPrint("<h1>Event Rankings: Top " + limit + " Teams</h1><h3 style='margin-top:0;color:#555'>Sorted by: " + metricLabel + "</h3><table style='width:100%;border-collapse:collapse;text-align:left;font-size:12px'><thead><tr style='background:#f0f0f0'><th style='padding:10px'>Rank</th><th style='padding:10px'>Team</th><th style='padding:10px'>Avg Total</th><th style='padding:10px'>Auto Pts</th><th style='padding:10px'>Tele Hubs</th><th style='padding:10px'>Ferry</th><th style='padding:10px'>End Pts</th><th style='padding:10px'>Auto Miss</th><th style='padding:10px'>Incap Sec</th><th style='padding:10px'>Matches</th></tr></thead><tbody>"+rows+"</tbody></table>");
+}
+
+function openPrint(html, extraStyle){
+  var w = window.open("","","width=1000,height=700");
+  w.document.write("<html><head><title>Scouting Report</title><style>"+
+    "body{font-family:sans-serif;padding:30px;font-size:13px}"+
+    "h1{border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:6px}"+
+    "h2{font-size:16px;margin-top:20px}"+
+    "@media print{button{display:none}}"+
+    (extraStyle||"")+
+    "</style></head><body>"+
+    "<button onclick='window.print()' style='margin-bottom:20px;padding:10px 20px;background:#0a84ff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer'>&#x1F5A8; Print / Save PDF</button>"+
+    html+
+    "</body></html>");
+  w.document.close();
+  w.focus();
+}
+
+// ─── FILE UPLOAD ─────────────────────────────────────────────────────────────
+fileInput.addEventListener("change", function(e){
+  if(!e.target.files.length) return;
+  if(!qrLibLoaded){ log("QR library not loaded yet.", "error"); return; }
+  var reader = new Html5Qrcode("reader");
+  reader.scanFile(e.target.files[0], true)
+    .then(function(txt){ onScanSuccess(txt); })
+    .catch(function(){ log("Could not read QR from image.", "error"); });
+  e.target.value = "";
+});
 </script>
 </body>
 </html>

@@ -17,12 +17,12 @@ import {
 } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import PitScoutingView from './PitScoutingView';
-
+// WORKS!!!!  https://6k0bvq8z-8000.usw2.devtunnels.ms
 // App setup and configuration
 // If you're testing on a real phone, remember to swap 'localhost' with your computer's local IP address
 // const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
 // my computer ip address 192.168.1.55
-const DEFAULT_API_URL = '172.20.10.3:8000'; // Default if nothing saved
+const DEFAULT_API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms' ;// Default if nothing saved
 // Does not work on school wifi as it blocks the connection
 // go to wifi ip create a vs code port make it public copy forwared address
 
@@ -39,6 +39,16 @@ const AUTO_POSITIONS = ['Left', 'Center', 'Right'];
 const PASS_VOLUMES = ['None', 'Low', 'Med', 'High'];
 const AUTO_WINNERS = ['Red', 'Blue', 'Tie'];
 const ENDGAME_ACTIONS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Failed'];
+
+// Helper: fetch with a timeout so it doesn't hang forever on unreachable hosts
+const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 8000) => {
+  return Promise.race([
+    fetch(url, options),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Request timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    )
+  ]);
+};
 
 // The baseline state for a new match. We keep this here so we can easily reset the form later.
 const INITIAL_MATCH_DATA: MatchData = {
@@ -176,12 +186,33 @@ class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
 }
 
 // Screens
-const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSignUp, isLoading, password, setPassword, firstName, setFirstName, lastName, setLastName, isSignUpMode, setIsSignUpMode, teamPassword, setTeamPassword }: any) => (
+const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSignUp, handleOfflineLogin, isLoading, password, setPassword, firstName, setFirstName, lastName, setLastName, isSignUpMode, setIsSignUpMode, teamPassword, setTeamPassword, apiUrlInput, setApiUrlInput, onSaveApiUrl }: any) => (
   <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
     <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
       <View style={styles.card}>
         <Text style={styles.title}>FRC 2026</Text>
         <Text style={styles.subtitle}>{isSignUpMode ? 'Scouting Sign Up' : 'Scouting Login'}</Text>
+
+        <Text style={[styles.label, { marginTop: 5 }]}>Backend URL</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 5, width: '100%' }}>
+          <TextInput
+            style={[styles.input, { flex: 1, marginBottom: 0, marginRight: 8 }]}
+            placeholder="http://192.0.0.2:8000"
+            placeholderTextColor="#666"
+            autoCapitalize="none"
+            value={apiUrlInput}
+            onChangeText={setApiUrlInput}
+          />
+          <TouchableOpacity
+            style={{ backgroundColor: '#ff9500', paddingVertical: 12, paddingHorizontal: 14, borderRadius: 8 }}
+            onPress={onSaveApiUrl}
+          >
+            <Text style={{ color: 'white', fontWeight: 'bold' }}>Save</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={{ color: '#888', fontSize: 11, marginBottom: 15, textAlign: 'left', width: '100%' }}>
+          To get this URL, open VS Code, go to the "Ports" tab (usually next to Terminal), add a port for 8000, right-click it to change Port Visibility to "Public", and copy the Forwarded Address.
+        </Text>
         
         {errorMessage ? (
           <View style={{ backgroundColor: '#ff3b3033', padding: 10, borderRadius: 8, marginBottom: 15, borderWidth: 1, borderColor: '#ff3b30' }}>
@@ -250,6 +281,12 @@ const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSig
             {isSignUpMode ? 'Already have an account? Log In' : 'Need an account? Sign Up'}
           </Text>
         </TouchableOpacity>
+
+        <TouchableOpacity onPress={handleOfflineLogin} style={{ marginTop: 5, alignItems: 'center', padding: 10 }}>
+          <Text style={{ color: '#4cd964', fontWeight: 'bold' }}>
+            Continue Offline (No Account)
+          </Text>
+        </TouchableOpacity>
         
         <Text style={styles.tinyText}>Requires internet for first login only.</Text>
       </View>
@@ -270,6 +307,7 @@ const DashboardView = ({
   setIsSettingsOpen,
   isSeatUnlocked,
   setIsSeatUnlocked,
+  setMatchesScouted,
   textCompression,
   setTextCompression
 }: any) => {
@@ -299,7 +337,20 @@ const DashboardView = ({
           <View style={[styles.progressBarFill, { width: `${progress}%`, backgroundColor: barColor }]} />
         </View>
         <Text style={styles.progressText}>{matchesScouted} / {SHIFT_LENGTH} Matches Scouted</Text>
-        {progress >= 100 && <Text style={styles.alertText}>SHIFT COMPLETE! PLEASE SWAP OUT.</Text>}
+        {progress >= 100 && (
+          <View style={{ marginTop: 10, alignItems: 'center' }}>
+            <Text style={styles.alertText}>SHIFT COMPLETE! PLEASE SWAP OUT.</Text>
+            <TouchableOpacity 
+              onPress={async () => {
+                setMatchesScouted(0);
+                await AsyncStorage.setItem(`@matches_scouted_${username}`, '0');
+              }}
+              style={{ marginTop: 10, backgroundColor: '#0a84ff', paddingVertical: 8, paddingHorizontal: 20, borderRadius: 8 }}
+            >
+              <Text style={{ color: '#fff', fontWeight: 'bold' }}>Reset Counter</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       <View style={styles.cardSection}>
@@ -561,6 +612,7 @@ export default function App() {
   // Logout verification
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [logoutInput, setLogoutInput] = useState('');
+  const [logoutKeyInput, setLogoutKeyInput] = useState('');
 
   // Match Schedule State
   const [schedule, setSchedule] = useState<any>(DEFAULT_SCHEDULE);
@@ -573,19 +625,12 @@ export default function App() {
 
   const [form, setForm] = useState<MatchData>(INITIAL_MATCH_DATA);
 
-  // Check if they left the app and came back, so they don't have to login again
   useEffect(() => {
     AsyncStorage.getItem('@scout_username').then(u => {
       if (u) {
         setUsername(u);
         setCurrentView('dashboard');
       }
-    });
-    AsyncStorage.getItem('@match_queue').then(q => {
-      if (q) setMatchQueue(JSON.parse(q));
-    });
-    AsyncStorage.getItem('@match_history').then(h => {
-      if (h) setHistoryQueue(JSON.parse(h));
     });
     AsyncStorage.getItem('@scout_station').then(s => {
       if (s) setStation(s as Station);
@@ -622,6 +667,28 @@ export default function App() {
     });
   }, []);
 
+  // Isolate match queue & history based on username
+  useEffect(() => {
+    if (username) {
+      AsyncStorage.getItem(`@match_queue_${username}`).then(q => {
+        if (q) setMatchQueue(JSON.parse(q));
+        else setMatchQueue([]);
+      });
+      AsyncStorage.getItem(`@match_history_${username}`).then(h => {
+        if (h) setHistoryQueue(JSON.parse(h));
+        else setHistoryQueue([]);
+      });
+      AsyncStorage.getItem(`@matches_scouted_${username}`).then(m => {
+        if (m) setMatchesScouted(parseInt(m, 10));
+        else setMatchesScouted(0);
+      });
+    } else {
+      setMatchQueue([]);
+      setHistoryQueue([]);
+      setMatchesScouted(0);
+    }
+  }, [username]);
+
   // When the match number or station changes, try to automatically figure out the team number for them
   useEffect(() => {
     if (form.matchType === 'Qual' && schedule[form.matchNumber] && station) {
@@ -639,13 +706,15 @@ export default function App() {
       return;
     }
     setIsLoading(true);
+    const targetUrl = `${apiUrl}/auth/login`;
+    console.log('[LOGIN] Attempting to reach:', targetUrl);
     try {
-      // Connect to the backend to verify the scouter
-      const res = await fetch(`${apiUrl}/auth/login`, {
+      const res = await fetchWithTimeout(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username, password: password })
       });
+      console.log('[LOGIN] Response status:', res.status);
       const data = await res.json();
       
       if (res.status === 201) {
@@ -655,16 +724,24 @@ export default function App() {
         await AsyncStorage.setItem('@refresh_token', data.refreshToken);
         setCurrentView('dashboard');
       } else {
-        const msg = data.code || "Login failed";
+        const msg = data.code || `Login failed (HTTP ${res.status})`;
         setErrorMessage(msg);
         Alert.alert("Error", msg);
       }
     } catch (e: any) {
-      const msg = "Could not reach backend";
+      console.log('[LOGIN] Error:', e.message);
+      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}\n\nMake sure:\n• URL starts with http://\n• Backend server is running\n• Both devices are on the same WiFi`;
       setErrorMessage(msg);
       Alert.alert("Network Error", msg);
     }
     setIsLoading(false);
+  };
+
+  const handleOfflineLogin = async () => {
+    setUsername('OfflineScouter');
+    setToken('offline-token');
+    await AsyncStorage.setItem('@scout_username', 'OfflineScouter');
+    setCurrentView('dashboard');
   };
 
   const handleSignUp = async () => {
@@ -677,13 +754,15 @@ export default function App() {
     }
     
     setIsLoading(true);
-    
+    const targetUrl = `${apiUrl}/auth/sign-up`;
+    console.log('[SIGNUP] Attempting to reach:', targetUrl);
     try {
-      const res = await fetch(`${apiUrl}/auth/sign-up`, {
+      const res = await fetchWithTimeout(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, firstName, lastName, teamPassword })
       });
+      console.log('[SIGNUP] Response status:', res.status);
       const data = await res.json();
       
       if (res.status === 201) {
@@ -693,12 +772,13 @@ export default function App() {
         await AsyncStorage.setItem('@refresh_token', data.refreshToken);
         setCurrentView('dashboard');
       } else {
-        const msg = data.code || "Sign up failed";
+        const msg = data.code || `Sign up failed (HTTP ${res.status})`;
         setErrorMessage(msg);
         Alert.alert("Error", msg);
       }
     } catch (e: any) {
-      const msg = e.message || "Could not reach backend";
+      console.log('[SIGNUP] Error:', e.message);
+      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}\n\nMake sure:\n• URL starts with http://\n• Backend server is running\n• Both devices are on the same WiFi`;
       setErrorMessage(msg);
       Alert.alert("Network Error", msg);
     }
@@ -734,7 +814,7 @@ export default function App() {
 
     // Because the old backend doesn't support our shiny new UI fields,
     // we bundle the new metrics into the generic notes string so we don't lose the data.
-    let extraData = '';
+    let extraData = `[Start:${form.startPos}] [Pass:${form.autoPassVol}] [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] [Bump:${form.bumpCross}] [Trench:${form.trenchCross}] [Time:${form.climbTime || "0"}s] [Dead:${form.incapacitated ? 'DIE' : 'OK'}]`;
     let parsedNotes = form.notes.replace(/\|/g, ''); // Make sure to strip any accidental pipe characters
     
     // If incapacitated but no time entered, assume full match (150s)
@@ -820,6 +900,8 @@ export default function App() {
       }
     };
 
+    console.log("[DEBUG] Payload Sent to API via index.tsx:", JSON.stringify(reportPayload, null, 2));
+
     try {
       if (token) {
         const res = await fetch(`${apiUrl}/report`, {
@@ -849,13 +931,15 @@ export default function App() {
     // Save to device storage
     const newQueue = [...matchQueue, newRecord];
     setMatchQueue(newQueue);
-    await AsyncStorage.setItem('@match_queue', JSON.stringify(newQueue));
+    await AsyncStorage.setItem(`@match_queue_${username}`, JSON.stringify(newQueue));
 
     const newHistory = [...historyQueue, newRecord];
     setHistoryQueue(newHistory);
-    await AsyncStorage.setItem('@match_history', JSON.stringify(newHistory));
+    await AsyncStorage.setItem(`@match_history_${username}`, JSON.stringify(newHistory));
 
-    setMatchesScouted(prev => prev + 1);
+    const newMatchesScouted = matchesScouted + 1;
+    setMatchesScouted(newMatchesScouted);
+    await AsyncStorage.setItem(`@matches_scouted_${username}`, newMatchesScouted.toString());
     
     // Automatically increment the match number for the next round
     const nextMatch = (parseInt(form.matchNumber, 10) + 1).toString();
@@ -871,7 +955,7 @@ export default function App() {
 
   const clearQueue = async () => {
     setMatchQueue([]);
-    await AsyncStorage.setItem('@match_queue', '[]');
+    await AsyncStorage.setItem(`@match_queue_${username}`, '[]');
     setShowQR(false);
   };
 
@@ -1132,12 +1216,22 @@ export default function App() {
             </Text>
             <Text style={styles.label}>Type &quot;LOGOUT&quot; to confirm:</Text>
             <TextInput
-              style={[styles.input, { marginBottom: 20, flex: 0, minHeight: 50, width: '100%' }]}
+              style={[styles.input, { marginBottom: 10, flex: 0, minHeight: 50, width: '100%' }]}
               placeholder='LOGOUT'
               placeholderTextColor="#666"
               autoCapitalize='characters'
               value={logoutInput}
               onChangeText={setLogoutInput}
+            />
+            <Text style={styles.label}>Enter your Seat Key to verify:</Text>
+            <TextInput
+              style={[styles.input, { marginBottom: 20, flex: 0, minHeight: 50, width: '100%' }]}
+              placeholder='••••••••••••'
+              placeholderTextColor="#666"
+              autoCapitalize='characters'
+              secureTextEntry={true}
+              value={logoutKeyInput}
+              onChangeText={setLogoutKeyInput}
             />
             <View style={{ flexDirection: 'row', gap: 10, width: '100%' }}>
               <TouchableOpacity 
@@ -1145,16 +1239,18 @@ export default function App() {
                 onPress={() => {
                   setShowLogoutConfirm(false);
                   setLogoutInput('');
+                  setLogoutKeyInput('');
                 }}
               >
                 <Text style={styles.closeBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                style={[styles.closeBtn, { flex: 1, backgroundColor: logoutInput === 'LOGOUT' ? '#ff3b30' : '#333' }]} 
-                disabled={logoutInput !== 'LOGOUT'}
+                style={[styles.closeBtn, { flex: 1, backgroundColor: (logoutInput === 'LOGOUT' && logoutKeyInput === masterSeatKey) ? '#ff3b30' : '#333' }]} 
+                disabled={logoutInput !== 'LOGOUT' || logoutKeyInput !== masterSeatKey}
                 onPress={() => {
                   setShowLogoutConfirm(false);
                   setLogoutInput('');
+                  setLogoutKeyInput('');
                   handleLogout();
                 }}
               >
@@ -1173,6 +1269,7 @@ export default function App() {
           setUsername={setUsername} 
           handleLogin={handleLogin} 
           handleSignUp={handleSignUp}
+          handleOfflineLogin={handleOfflineLogin}
           isLoading={isLoading} 
           password={password}
           setPassword={setPassword}
@@ -1186,6 +1283,16 @@ export default function App() {
           setIsSignUpMode={(mode: boolean) => {
             setIsSignUpMode(mode);
             setErrorMessage('');
+          }}
+          apiUrlInput={apiUrlInput}
+          setApiUrlInput={setApiUrlInput}
+          onSaveApiUrl={async () => {
+            let cleaned = apiUrlInput.trim();
+            if (cleaned.endsWith('/')) cleaned = cleaned.slice(0, -1);
+            setApiUrl(cleaned);
+            setApiUrlInput(cleaned);
+            await AsyncStorage.setItem('@api_url', cleaned);
+            Alert.alert("Success", "API URL Updated!");
           }}
         />
       )}
@@ -1212,6 +1319,7 @@ export default function App() {
           setIsSeatUnlocked={setIsSeatUnlocked}
           textCompression={textCompression}
           setTextCompression={setTextCompression}
+          setMatchesScouted={setMatchesScouted}
         />
       )}
       
