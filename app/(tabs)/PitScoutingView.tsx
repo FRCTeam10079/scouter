@@ -30,11 +30,15 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
   const [form, setForm] = useState({
     teamNumber: '',
     drivetrain: 'Swerve', // Default
-    shooter: 'Flywheel', // Default
+    shooter: 'Single Shooter', // Default
+    hasDrumShooter: false,
+    estimatedBps: '',
+    driverExperience: '',
     weight: '',
     width: '',
     length: '',
     autoRoutines: '',
+    canFerry: false,
     canClimb: false,
     climbLevels: [] as number[],
     notes: '',
@@ -90,7 +94,7 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
 
       Alert.alert("Success", `Local Pit Data for Team ${form.teamNumber} saved!`);
       // Reset Form
-      setForm({ ...form, teamNumber: '', weight: '', width: '', length: '', autoRoutines: '', notes: '', photoBase64: '', climbLevels: [] });
+      setForm({ ...form, teamNumber: '', hasDrumShooter: false, estimatedBps: '', driverExperience: '', weight: '', width: '', length: '', autoRoutines: '', notes: '', photoBase64: '', canFerry: false, climbLevels: [] });
     } catch (e) {
       Alert.alert("Error", "Could not save pit report locally.");
     }
@@ -125,6 +129,10 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
       <td>${escapeHtml(report.teamNumber || 'N/A')}</td>
       <td>${escapeHtml(report.drivetrain || 'N/A')}</td>
       <td>${escapeHtml(report.shooter || 'N/A')}</td>
+      <td>${report.hasDrumShooter ? 'Yes' : 'No'}</td>
+      <td>${escapeHtml(report.estimatedBps || '?')}</td>
+      <td>${escapeHtml(report.driverExperience || '?')}</td>
+      <td>${report.canFerry ? 'Yes' : 'No'}</td>
       <td>${escapeHtml(climbLevelLabel(report))}</td>
       <td>${escapeHtml(report.weight || '?')} / ${escapeHtml(report.width || '?')} / ${escapeHtml(report.length || '?')}</td>
       <td>${escapeHtml(report.autoRoutines || '-')}</td>
@@ -140,6 +148,10 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
       <div class="grid">
         <div class="box"><div class="label">Drivetrain</div><div class="value">${escapeHtml(report.drivetrain || 'N/A')}</div></div>
         <div class="box"><div class="label">Shooter</div><div class="value">${escapeHtml(report.shooter || 'N/A')}</div></div>
+        <div class="box"><div class="label">Drum Shooter</div><div class="value">${report.hasDrumShooter ? 'Yes' : 'No'}</div></div>
+        <div class="box"><div class="label">Estimated BPS</div><div class="value">${escapeHtml(report.estimatedBps || '?')}</div></div>
+        <div class="box"><div class="label">Driver Experience</div><div class="value">${escapeHtml(report.driverExperience || '?')} events</div></div>
+        <div class="box"><div class="label">Can Ferry</div><div class="value">${report.canFerry ? 'Yes' : 'No'}</div></div>
         <div class="box"><div class="label">Climb</div><div class="value">${escapeHtml(climbLevelLabel(report))}</div></div>
       </div>
 
@@ -209,6 +221,10 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
                   <th>Team</th>
                   <th>Drivetrain</th>
                   <th>Shooter</th>
+                  <th>Drum</th>
+                  <th>Est BPS</th>
+                  <th>Driver Exp</th>
+                  <th>Can Ferry</th>
                   <th>Climb</th>
                   <th>Wgt/W/L</th>
                   <th>Auto</th>
@@ -284,7 +300,7 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
       : savedReports;
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <View style={styles.headerRow}>
         <TouchableOpacity onPress={onBack}><Text style={styles.backLink}>← Dashboard</Text></TouchableOpacity>
         <Text style={styles.headerTitle}>Pit Scouting</Text>
@@ -345,6 +361,9 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
                 </TouchableOpacity>
               </View>
               <Text style={{color: '#aaa', marginTop: 5}}>Drive: {r.drivetrain} | Shooter: {r.shooter}</Text>
+              <Text style={{color: '#aaa'}}>Drum Shooter: {r.hasDrumShooter ? 'Yes' : 'No'}</Text>
+              <Text style={{color: '#aaa'}}>Estimated BPS: {r.estimatedBps || '?'} | Driver Exp: {r.driverExperience || '?'} events</Text>
+              <Text style={{color: '#aaa'}}>Can Ferry: {r.canFerry ? 'Yes' : 'No'}</Text>
               <Text style={{color: '#aaa'}}>Climb: {r.canClimb ? "Yes" : "No"} {r.climbLevels && r.climbLevels.length > 0 ? `(L${r.climbLevels.join(', L')})` : ''}</Text>
               <Text style={{color: '#aaa', fontStyle: 'italic', marginTop: 5}}>{r.notes}</Text>
               {r.photoBase64 ? (
@@ -383,7 +402,7 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
 
         <Text style={styles.label}>Shooter Type</Text>
         <View style={styles.row}>
-          {['Flywheel', 'Turret', 'Other', 'None'].map(type => (
+          {['Single Shooter', 'Dual Shooter', 'Triple Shooter', 'Turret'].map(type => (
             <TouchableOpacity 
               key={type} 
               style={[styles.optionBtn, form.shooter === type && styles.activeBtn]}
@@ -393,6 +412,33 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
             </TouchableOpacity>
           ))}
         </View>
+
+        <TouchableOpacity
+          style={[styles.toggleBtn, form.hasDrumShooter && styles.activeGreen]}
+          onPress={() => setForm({...form, hasDrumShooter: !form.hasDrumShooter})}
+        >
+          <Text style={styles.toggleText}>Do they have a Drum Shooter? {form.hasDrumShooter ? "YES" : "NO"}</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.label}>Estimated BPS</Text>
+        <TextInput
+          style={styles.input}
+          keyboardType="numeric"
+          placeholder="e.g. 6.5"
+          placeholderTextColor="#666"
+          value={form.estimatedBps}
+          onChangeText={t => setForm({...form, estimatedBps: t})}
+        />
+
+        <Text style={styles.label}>Driver Experience (Events Gone To)</Text>
+        <TextInput
+          style={styles.input}
+          keyboardType="numeric"
+          placeholder="e.g. 4"
+          placeholderTextColor="#666"
+          value={form.driverExperience}
+          onChangeText={t => setForm({...form, driverExperience: t})}
+        />
 
         <Text style={styles.label}>Physical Specs</Text>
         <View style={styles.row}>
@@ -407,6 +453,13 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
           onPress={() => setForm({...form, canClimb: !form.canClimb, climbLevels: form.canClimb ? [] : form.climbLevels})}
         >
           <Text style={styles.toggleText}>Can they Climb? {form.canClimb ? "YES" : "NO"}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.toggleBtn, form.canFerry && styles.activeGreen]}
+          onPress={() => setForm({...form, canFerry: !form.canFerry})}
+        >
+          <Text style={styles.toggleText}>Are they able to Ferry? {form.canFerry ? "YES" : "NO"}</Text>
         </TouchableOpacity>
 
         {form.canClimb && (
@@ -482,7 +535,7 @@ export default function PitScoutingView({ onBack, username, token, apiUrl }: any
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#121212', padding: 20 },
+  container: { backgroundColor: '#121212', padding: 20, paddingBottom: 40 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   backLink: { color: '#0a84ff', fontSize: 16 },
   headerTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold' },

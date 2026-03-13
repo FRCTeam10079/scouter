@@ -52,7 +52,7 @@ const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 8000) => {
 
 // The baseline state for a new match. We keep this here so we can easily reset the form later.
 const INITIAL_MATCH_DATA: MatchData = {
-  id: '', scouter: '', eventCode: '2026A', matchType: 'Qual', matchNumber: '1', teamNumber: '',
+  scouter: '', eventCode: '2026A', matchType: 'Qual', matchNumber: '1', teamNumber: '',
   station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
   autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false },
   autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
@@ -211,7 +211,7 @@ const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSig
           </TouchableOpacity>
         </View>
         <Text style={{ color: '#888', fontSize: 11, marginBottom: 15, textAlign: 'left', width: '100%' }}>
-          To get this URL, open VS Code, go to the "Ports" tab (usually next to Terminal), add a port for 8000, right-click it to change Port Visibility to "Public", and copy the Forwarded Address.
+          To get this URL, open VS Code, go to the &quot;Ports&quot; tab (usually next to Terminal), add a port for 8000, right-click it to change Port Visibility to &quot;Public&quot;, and copy the Forwarded Address.
         </Text>
         
         {errorMessage ? (
