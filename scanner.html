@@ -32,10 +32,12 @@ th,td{border-bottom:1px solid #333;padding:10px;text-align:left}
 th{background:#252525;color:#aaa;text-transform:uppercase;font-size:11px}
 tr:hover{background:rgba(255,255,255,.05)}
 .empty-row td{text-align:center;padding:20px;color:#666}
-.cam-wrapper{position:relative;width:100%;min-height:300px;background:#000;border:2px solid #444;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
-#reader{width:100%;height:100%}
+.cam-wrapper{position:relative;width:100%;height:clamp(320px,52vh,560px);min-height:320px;max-height:560px;aspect-ratio:4/3;background:#000;border:2px solid #444;border-radius:8px;overflow:hidden;display:block}
+#reader{position:absolute;inset:0;width:100%;height:100%}
+#reader video{width:100%!important;height:100%!important;object-fit:cover!important;display:block;transform-origin:center center;transition:transform .16s ease-out;will-change:transform}
 #cam-placeholder{color:#555;font-size:14px;pointer-events:none}
 #scan-overlay{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.85);display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:10}
+.scan-hint{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);background:rgba(255,149,0,.94);color:#111;padding:9px 12px;border-radius:8px;font-size:12px;font-weight:700;z-index:9;box-shadow:0 6px 18px rgba(0,0,0,.35);max-width:92%;text-align:center}
 .check-icon{font-size:60px;margin-bottom:10px}
 .scan-msg{font-size:20px;font-weight:bold;margin-bottom:5px}
 .scan-detail{font-size:14px;color:#aaa}
@@ -68,11 +70,7 @@ tr:hover{background:rgba(255,255,255,.05)}
       <div style="background:#252525;padding:20px;border-radius:8px">
         <h4>Single Team Report</h4>
         <input id="print-team-input" type="number" placeholder="Enter Team # (e.g. 254)" style="font-size:18px;text-align:center">
-        <p style="color:#aaa;font-size:12px;margin:10px 0 6px">Report Layout:</p>
-        <div style="display:flex;gap:8px;margin-bottom:12px">
-          <button id="layout-expanded-btn" onclick="setLayout('expanded')" style="flex:1;padding:10px;font-size:13px;background:#0a84ff;border:2px solid #0a84ff;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer">&#9638; Expanded</button>
-          <button id="layout-compact-btn" onclick="setLayout('compact')" style="flex:1;padding:10px;font-size:13px;background:#333;border:2px solid #555;border-radius:6px;color:#aaa;font-weight:bold;cursor:pointer">&#9776; Compact</button>
-        </div>
+        <p style="color:#aaa;font-size:12px;margin:10px 0 12px">Single-page summary (no per-match breakdown).</p>
         <button onclick="printTeamReport()">Generate Team Report</button>
       </div>
       <div style="background:#252525;padding:20px;border-radius:8px">
@@ -92,6 +90,14 @@ tr:hover{background:rgba(255,255,255,.05)}
         </div>
         <button onclick="printRankings()" style="background:#22c55e;font-size:14px;margin-top:0">Print Top List</button>
       </div>
+      <div style="background:#252525;padding:20px;border-radius:8px">
+        <h4>Single Match (All 6 Teams)</h4>
+        <p style="font-size:12px;color:#aaa">One-page match report grouped by Red/Blue with positions and conflicts. Uses scouting station info first.</p>
+        <input id="print-match-input" type="number" placeholder="Enter Match # (e.g. 18)" style="font-size:18px;text-align:center">
+        <input id="tba-event-key-input" type="text" placeholder="Optional TBA Event Key (fallback only)">
+        <input id="tba-api-key-input" type="password" placeholder="Optional TBA API Key (runtime only)">
+        <button onclick="printMatchReportFromInput()" style="background:#ff9500">Generate Match Report</button>
+      </div>
     </div>
   </div>
 
@@ -109,11 +115,16 @@ tr:hover{background:rgba(255,255,255,.05)}
             <div class="scan-detail" id="scan-info">Match - Team</div>
             <button class="success-btn" onclick="resetScanner()">Scan Next Tablet</button>
           </div>
+          <div id="scan-hint" class="scan-hint hidden">Possible QR seen. Move closer and hold steady.</div>
         </div>
         <div class="btn-group">
           <button id="cam-btn" onclick="toggleCamera()">Start Camera</button>
           <button class="secondary" onclick="document.getElementById('file-input').click()">Upload Image</button>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:#bbb">
+          <input id="advanced-scan-toggle" type="checkbox" checked style="width:auto;margin:0">
+          Advanced scan assist (hint + smart sweep + auto zoom)
+        </label>
         <input id="file-input" type="file" accept="image/*" class="hidden">
       </div>
       <div>
@@ -139,13 +150,50 @@ tr:hover{background:rgba(255,255,255,.05)}
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 var API_URL = "https://6k0bvq8z-8000.usw2.devtunnels.ms";
 var TIMEOUT  = 5000;
+var SCAN_INTERVAL_MS = 120;
+var SMART_DECODE_INTERVAL_MS = 420;
+var ZXING_LOCAL_IIFE = "./scanner-assets/zxing/reader/index.js";
+var ZXING_LOCAL_WASM = "./scanner-assets/zxing/reader/zxing_reader.wasm";
+var ZXING_CDN_IIFE = "https://cdn.jsdelivr.net/npm/zxing-wasm@3.0.1/dist/iife/reader/index.js";
+var OFFLINE_QUEUE_KEY = "@scanner_pending_reports_v1";
+var TBA_EVENT_KEY_STORAGE = "@scanner_tba_event_key_v1";
+var TBA_SCHEDULE_CACHE_PREFIX = "@scanner_tba_schedule_";
 
 // ─── STATE ───────────────────────────────────────────────────────────────────
 var AUTH_TOKEN      = "";
-var qrScanner       = null;
+var cameraStream    = null;
+var scanVideoEl     = null;
+var scanCanvasEl    = null;
+var scanLoopId      = null;
+var isDecodingFrame = false;
+var lastDecodeTs    = 0;
 var cameraOn        = false;
 var processingFlag  = false;
 var qrLibLoaded     = false;
+var readBarcodesFn  = null;
+var scanSavedKeys   = Object.create(null);
+var scanInFlightKeys= Object.create(null);
+var pendingReports  = [];
+var likelyQrStreak  = 0;
+var hintHideTimer   = null;
+var lastHintTs      = 0;
+var cameraTrack     = null;
+var zoomCap         = null;
+var zoomMin         = 1;
+var zoomMax         = 1;
+var zoomStep        = 0.1;
+var currentZoom     = 1;
+var targetZoom      = 1;
+var zoomApplyBusy   = false;
+var lastSmartDecodeTs = 0;
+var smartCanvasEl   = null;
+var smartCtx        = null;
+var visualZoom      = 1;
+var visualPanX      = 0;
+var visualPanY      = 0;
+var visualTargetZoom = 1;
+var visualCurrentZoom = 1;
+var advancedScanEnabled = true;
 
 // ─── DOM REFS ────────────────────────────────────────────────────────────────
 function $(id){ return document.getElementById(id); }
@@ -157,12 +205,14 @@ var loginBtn   = $("login-btn");
 var camBtn     = $("cam-btn");
 var scanOverlay= $("scan-overlay");
 var scanInfo   = $("scan-info");
+var scanHint   = $("scan-hint");
 var logsBox    = $("logs");
 var tableBody  = $("table-body");
 var fileInput  = $("file-input");
 var statusBadge= $("connection-status");
 var libMsg     = $("lib-msg");
 var camHolder  = $("cam-placeholder");
+var advancedScanToggle = $("advanced-scan-toggle");
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function fetchTimeout(url, opts){
@@ -183,6 +233,90 @@ function log(msg, type){
 function clearLogs(){
   logsBox.innerHTML = "";
   log("Logs cleared.");
+}
+
+function loadPendingReports(){
+  try{
+    var raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+    pendingReports = raw ? JSON.parse(raw) : [];
+    if(!Array.isArray(pendingReports)) pendingReports = [];
+  } catch(_e){
+    pendingReports = [];
+  }
+}
+
+function savePendingReports(){
+  try{
+    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(pendingReports));
+  } catch(_e){
+    // Ignore storage errors; queue is best effort.
+  }
+}
+
+function pendingReportKey(item){
+  var p = item && item.payload ? item.payload : {};
+  return [p.eventCode || "", p.matchNumber || "", p.teamNumber || ""].join("|");
+}
+
+function enqueuePendingReport(payload){
+  var key = [payload.eventCode || "", payload.matchNumber || "", payload.teamNumber || ""].join("|");
+  var exists = pendingReports.some(function(item){ return pendingReportKey(item) === key; });
+  if(exists) return false;
+
+  pendingReports.push({
+    payload: payload,
+    queuedAt: new Date().toISOString()
+  });
+  savePendingReports();
+  return true;
+}
+
+function flushPendingReports(){
+  if(!AUTH_TOKEN || AUTH_TOKEN === "offline-demo-token" || pendingReports.length === 0) return;
+
+  var queue = pendingReports.slice();
+  var nextPending = [];
+  var savedCount = 0;
+
+  var chain = Promise.resolve();
+  queue.forEach(function(item){
+    chain = chain.then(function(){
+      return fetchTimeout(API_URL + "/report", {
+        method:"POST",
+        headers:{"Content-Type":"application/json","Authorization":"Bearer " + AUTH_TOKEN},
+        body:JSON.stringify(item.payload)
+      })
+      .then(function(res){
+        if(res.status === 201) {
+          savedCount++;
+          return;
+        }
+        return res.json()
+          .then(function(err){
+            if(err && err.message && err.message.indexOf("Unique") !== -1){
+              savedCount++;
+              return;
+            }
+            nextPending.push(item);
+          })
+          .catch(function(){
+            nextPending.push(item);
+          });
+      })
+      .catch(function(){
+        nextPending.push(item);
+      });
+    });
+  });
+
+  chain.then(function(){
+    pendingReports = nextPending;
+    savePendingReports();
+    if(savedCount > 0){
+      log("Synced " + savedCount + " offline report(s).", "success");
+      fetchData();
+    }
+  });
 }
 
 function hideAllMatches(){
@@ -209,12 +343,326 @@ function hideAllMatches(){
 // ─── QR LIBRARY (loaded only when entering scanner tab) ──────────────────────
 function ensureQrLib(cb){
   if(qrLibLoaded){ cb(); return; }
-  libMsg.textContent = "Loading QR scanner...";
-  var s = document.createElement("script");
-  s.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
-  s.onload  = function(){ qrLibLoaded = true; libMsg.textContent = ""; cb(); };
-  s.onerror = function(){ libMsg.textContent = "QR lib failed (no internet?). Use Upload Image instead."; libMsg.style.color="#ff453a"; };
-  document.body.appendChild(s); // append to BODY, not head — avoids parser issues
+  libMsg.textContent = "Loading zxing-wasm scanner (offline-first)...";
+
+  var onReady = function(){
+    if(!(window.ZXingWASM && typeof window.ZXingWASM.readBarcodes === "function")){
+      return false;
+    }
+    if(typeof window.ZXingWASM.prepareZXingModule === "function"){
+      window.ZXingWASM.prepareZXingModule({
+        overrides: {
+          locateFile: function(path, prefix){
+            if(path && path.endsWith(".wasm")) return ZXING_LOCAL_WASM;
+            return prefix + path;
+          }
+        }
+      });
+    }
+    readBarcodesFn = window.ZXingWASM.readBarcodes;
+    qrLibLoaded = true;
+    libMsg.textContent = "";
+    cb();
+    return true;
+  };
+
+  var loadScript = function(src, onFailure){
+    var s = document.createElement("script");
+    s.src = src;
+    s.onload = function(){
+      if(!onReady()){
+        libMsg.textContent = "zxing-wasm loaded but scanner API missing.";
+        libMsg.style.color="#ff453a";
+      }
+    };
+    s.onerror = onFailure;
+    document.body.appendChild(s); // append to BODY, not head — avoids parser issues
+  };
+
+  // Try local vendored assets first so scanner works without internet.
+  loadScript(ZXING_LOCAL_IIFE, function(){
+    libMsg.textContent = "Local scanner assets missing; trying CDN...";
+    libMsg.style.color="#ff9500";
+    loadScript(ZXING_CDN_IIFE, function(){
+      libMsg.textContent = "QR lib failed (offline and no local assets).";
+      libMsg.style.color="#ff453a";
+    });
+  });
+}
+
+function ensureScanElements(){
+  if(scanVideoEl && scanCanvasEl) return;
+  var reader = $("reader");
+  reader.innerHTML = "";
+
+  scanVideoEl = document.createElement("video");
+  scanVideoEl.setAttribute("playsinline", "true");
+  scanVideoEl.setAttribute("autoplay", "true");
+  scanVideoEl.muted = true;
+  scanVideoEl.style.width = "100%";
+  scanVideoEl.style.height = "100%";
+  scanVideoEl.style.objectFit = "cover";
+  scanVideoEl.style.display = "block";
+  reader.appendChild(scanVideoEl);
+
+  scanCanvasEl = document.createElement("canvas");
+  smartCanvasEl = document.createElement("canvas");
+  smartCtx = smartCanvasEl.getContext("2d", { willReadFrequently: true });
+}
+
+function normalizeCameraViewport(){
+  var wrapper = document.querySelector(".cam-wrapper");
+  if(!wrapper) return;
+
+  // Keep camera stable: prefer 4:3 from current width, bounded by viewport and min/max.
+  var w = wrapper.clientWidth || 0;
+  var desired = w ? Math.round(w * 0.75) : 420;
+  var maxByViewport = Math.round(window.innerHeight * 0.62);
+  var h = Math.max(320, Math.min(560, Math.min(desired, maxByViewport || 560)));
+  wrapper.style.height = h + "px";
+}
+
+function showScanHint(msg){
+  if(!scanHint || processingFlag) return;
+  scanHint.textContent = msg || "Possible QR seen. Move closer and hold steady.";
+  scanHint.classList.remove("hidden");
+  if(hintHideTimer) clearTimeout(hintHideTimer);
+  hintHideTimer = setTimeout(function(){
+    if(scanHint) scanHint.classList.add("hidden");
+    hintHideTimer = null;
+  }, 1300);
+}
+
+function hideScanHint(){
+  if(!scanHint) return;
+  if(hintHideTimer){
+    clearTimeout(hintHideTimer);
+    hintHideTimer = null;
+  }
+  scanHint.classList.add("hidden");
+}
+
+function applyDigitalZoomVisual(zoom, panX, panY){
+  if(!scanVideoEl) return;
+  var z = Math.max(1, Number(zoom || 1));
+  var px = Number(panX || 0);
+  var py = Number(panY || 0);
+  if(px < -1) px = -1;
+  if(px > 1) px = 1;
+  if(py < -1) py = -1;
+  if(py > 1) py = 1;
+
+  var maxPanPct = Math.max(0, (z - 1) * 22);
+  var tx = (px * maxPanPct).toFixed(2);
+  var ty = (py * maxPanPct).toFixed(2);
+
+  visualZoom = z;
+  visualPanX = px;
+  visualPanY = py;
+  scanVideoEl.style.transform = "translate(" + tx + "%, " + ty + "%) scale(" + z.toFixed(2) + ")";
+}
+
+function updateDigitalZoomVisualSmooth(){
+  var alpha = 0.18;
+  visualCurrentZoom = visualCurrentZoom + (visualTargetZoom - visualCurrentZoom) * alpha;
+  if(Math.abs(visualCurrentZoom - visualTargetZoom) < 0.01) visualCurrentZoom = visualTargetZoom;
+  applyDigitalZoomVisual(visualCurrentZoom, 0, 0);
+}
+
+function resetDigitalZoomVisual(){
+  visualZoom = 1;
+  visualPanX = 0;
+  visualPanY = 0;
+  visualTargetZoom = 1;
+  visualCurrentZoom = 1;
+  if(scanVideoEl) scanVideoEl.style.transform = "translate(0%, 0%) scale(1)";
+}
+
+function resetAdaptiveCameraState(){
+  cameraTrack = null;
+  zoomCap = null;
+  zoomMin = 1;
+  zoomMax = 1;
+  zoomStep = 0.1;
+  currentZoom = 1;
+  targetZoom = 1;
+  zoomApplyBusy = false;
+  lastSmartDecodeTs = 0;
+  resetDigitalZoomVisual();
+}
+
+function setAdvancedScanEnabled(enabled){
+  advancedScanEnabled = !!enabled;
+  likelyQrStreak = 0;
+  hideScanHint();
+  visualTargetZoom = 1;
+  resetDigitalZoomVisual();
+
+  if(zoomCap){
+    targetZoom = zoomMin;
+    maybeUpdateHardwareZoom();
+  }
+
+  log("Advanced scan assist " + (advancedScanEnabled ? "enabled" : "disabled") + ".", "info");
+}
+
+function smartDecodeImageData(frame, w, h, roi){
+  if(!smartCanvasEl || !smartCtx || !frame || !frame.data) return null;
+  var sw = Math.max(40, Math.min(w, Math.round(roi.sw)));
+  var sh = Math.max(40, Math.min(h, Math.round(roi.sh)));
+  var sx = Math.max(0, Math.min(w - sw, Math.round(roi.sx)));
+  var sy = Math.max(0, Math.min(h - sh, Math.round(roi.sy)));
+  var scale = Number(roi.scale || 1);
+  if(!isFinite(scale) || scale < 1) scale = 1;
+
+  // Cap upscaled size to keep CPU bounded while improving tiny-QR readability.
+  var dw = Math.min(1600, Math.max(sw, Math.round(sw * scale)));
+  var dh = Math.min(1600, Math.max(sh, Math.round(sh * scale)));
+
+  smartCanvasEl.width = dw;
+  smartCanvasEl.height = dh;
+
+  // Convert frame ImageData into source canvas by reusing scanCanvasEl pixels.
+  var ctx = scanCanvasEl.getContext("2d", { willReadFrequently: true });
+  if(!ctx) return null;
+  ctx.putImageData(frame, 0, 0);
+
+  smartCtx.clearRect(0, 0, dw, dh);
+  smartCtx.imageSmoothingEnabled = false;
+  smartCtx.drawImage(scanCanvasEl, sx, sy, sw, sh, 0, 0, dw, dh);
+
+  return smartCtx.getImageData(0, 0, dw, dh);
+}
+
+function maybeUpdateHardwareZoom(){
+  if(!cameraTrack || !zoomCap || zoomApplyBusy) return;
+
+  if(Math.abs(targetZoom - currentZoom) < 0.05) return;
+  zoomApplyBusy = true;
+
+  var snapped = targetZoom;
+  if(zoomStep > 0) snapped = Math.round(snapped / zoomStep) * zoomStep;
+  snapped = Math.max(zoomMin, Math.min(zoomMax, snapped));
+
+  cameraTrack.applyConstraints({ advanced: [{ zoom: snapped }] })
+    .then(function(){ currentZoom = snapped; })
+    .catch(function(){ /* silently ignore unsupported/blocked zoom writes */ })
+    .finally(function(){ zoomApplyBusy = false; });
+}
+
+function runSmartDecodeSweep(frame, w, h){
+  var now = Date.now();
+  if((now - lastSmartDecodeTs) < SMART_DECODE_INTERVAL_MS) return Promise.resolve(null);
+  lastSmartDecodeTs = now;
+
+  var rois = [
+    { sx: 0, sy: 0, sw: w, sh: h, scale: 1.0 },
+    { sx: w * 0.10, sy: h * 0.10, sw: w * 0.80, sh: h * 0.80, scale: 1.2 },
+    { sx: w * 0.18, sy: h * 0.18, sw: w * 0.64, sh: h * 0.64, scale: 1.5 },
+    { sx: w * 0.25, sy: h * 0.25, sw: w * 0.50, sh: h * 0.50, scale: 2.0 },
+    { sx: w * 0.30, sy: h * 0.30, sw: w * 0.40, sh: h * 0.40, scale: 2.3 },
+    { sx: w * 0.02, sy: h * 0.18, sw: w * 0.64, sh: h * 0.64, scale: 1.4 },
+    { sx: w * 0.34, sy: h * 0.18, sw: w * 0.64, sh: h * 0.64, scale: 1.4 },
+    { sx: w * 0.18, sy: h * 0.02, sw: w * 0.64, sh: h * 0.64, scale: 1.4 },
+    { sx: w * 0.18, sy: h * 0.34, sw: w * 0.64, sh: h * 0.64, scale: 1.4 }
+  ];
+
+  var idx = 0;
+  function next(){
+    if(idx >= rois.length) return Promise.resolve(null);
+    var roiFrame = smartDecodeImageData(frame, w, h, rois[idx++]);
+    if(!roiFrame) return next();
+    return readBarcodesFn(roiFrame, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
+      .then(function(results){
+        if(results && results.length > 0 && results[0].text) return results[0].text;
+        return next();
+      })
+      .catch(function(){ return next(); });
+  }
+
+  return next();
+}
+
+function adaptScannerWhenLikelyQr(){
+  if(!advancedScanEnabled) return;
+
+  if(likelyQrStreak >= 2){
+    showScanHint("QR spotted. Move closer and hold steady.");
+  }
+
+  // Always apply digital zoom for laptop/webcam scenarios.
+  if(likelyQrStreak >= 2){
+    var z = 1.18;
+    if(likelyQrStreak >= 3) z = 1.35;
+    if(likelyQrStreak >= 4) z = 1.52;
+    if(likelyQrStreak >= 5) z = 1.70;
+    visualTargetZoom = z;
+  } else {
+    visualTargetZoom = 1;
+  }
+
+  if(zoomCap){
+    var desired = zoomMin;
+    if(likelyQrStreak >= 2) desired = zoomMin + (zoomMax - zoomMin) * 0.25;
+    if(likelyQrStreak >= 3) desired = zoomMin + (zoomMax - zoomMin) * 0.45;
+    if(likelyQrStreak >= 4) desired = zoomMin + (zoomMax - zoomMin) * 0.60;
+    targetZoom = desired;
+    maybeUpdateHardwareZoom();
+  }
+}
+
+function detectLikelyQrPresence(frame, w, h){
+  if(!frame || !frame.data || !w || !h) return false;
+
+  var data = frame.data;
+  var x0 = Math.floor(w * 0.2);
+  var y0 = Math.floor(h * 0.2);
+  var x1 = Math.floor(w * 0.8);
+  var y1 = Math.floor(h * 0.8);
+  var step = 5;
+
+  var sum = 0;
+  var sumSq = 0;
+  var count = 0;
+  var prevRowVals = [];
+  var transitionCount = 0;
+
+  for(var y = y0; y < y1; y += step){
+    var prevGray = -1;
+    var rowVals = [];
+    var rowIdx = 0;
+    for(var x = x0; x < x1; x += step){
+      var idx = (y * w + x) * 4;
+      var r = data[idx], g = data[idx + 1], b = data[idx + 2];
+      var gray = (r * 0.299 + g * 0.587 + b * 0.114);
+      sum += gray;
+      sumSq += gray * gray;
+      count++;
+
+      if(prevGray >= 0 && Math.abs(gray - prevGray) > 42) transitionCount++;
+      if(prevRowVals.length > rowIdx && Math.abs(gray - prevRowVals[rowIdx]) > 42) transitionCount++;
+
+      rowVals.push(gray);
+      prevGray = gray;
+      rowIdx++;
+    }
+    prevRowVals = rowVals;
+  }
+
+  if(count < 120) return false;
+  var mean = sum / count;
+  var variance = Math.max(0, (sumSq / count) - (mean * mean));
+  var stdDev = Math.sqrt(variance);
+  var transRatio = transitionCount / count;
+
+  // Heuristic: QR like frames usually have pretty high contrast and strong edge transitions.
+  return stdDev > 33 && transRatio > 0.30;
+}
+
+function buildScanKey(rawChunk){
+  var p = rawChunk.split("|");
+  if(p.length < 3) return "RAW|" + rawChunk;
+  return [p[0] || "", p[1] || "", p[2] || ""].join("|");
 }
 
 // ─── NAVIGATION ──────────────────────────────────────────────────────────────
@@ -225,6 +673,7 @@ function switchTab(tab){
   $("nav-print-btn").classList.add("secondary");
   if(tab === "scan"){
     scanSec.classList.remove("hidden");
+    normalizeCameraViewport();
     $("nav-scan-btn").classList.remove("secondary");
     ensureQrLib(function(){ log("QR scanner ready.", "success"); });
   } else {
@@ -282,39 +731,223 @@ function showScanner(){
   loginBtn.disabled = false;
   loginBtn.textContent = "Connect to Backend";
   switchTab("scan");
+  flushPendingReports();
 }
 
 // ─── CAMERA ──────────────────────────────────────────────────────────────────
 function toggleCamera(){
-  if(!qrLibLoaded){ log("QR library not ready yet.", "error"); return; }
+  if(!qrLibLoaded || !readBarcodesFn){ log("QR library not ready yet.", "error"); return; }
   if(cameraOn){
-    if(qrScanner) qrScanner.clear().catch(function(){});
-    cameraOn = false;
-    camBtn.textContent = "Start Camera";
-    camBtn.classList.remove("secondary");
-    camHolder.style.display = "";
+    stopCamera();
   } else {
+    startCamera();
+  }
+}
+
+function startCamera(){
+  ensureScanElements();
+  normalizeCameraViewport();
+  likelyQrStreak = 0;
+  hideScanHint();
+  resetAdaptiveCameraState();
+
+  if(!(navigator && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    log("Camera API unavailable. Open this page over https:// or localhost (not plain file://).", "error");
+    return;
+  }
+
+  if(window.isSecureContext === false){
+    log("Insecure page context. Camera requires https:// or localhost.", "error");
+    return;
+  }
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" },
+    audio: false
+  })
+  .then(function(stream){
+    cameraStream = stream;
+    cameraTrack = stream.getVideoTracks && stream.getVideoTracks()[0] ? stream.getVideoTracks()[0] : null;
+
+    if(cameraTrack && typeof cameraTrack.getCapabilities === "function"){
+      try{
+        var caps = cameraTrack.getCapabilities() || {};
+        if(caps.zoom){
+          zoomCap = caps.zoom;
+          zoomMin = Number(caps.zoom.min || 1);
+          zoomMax = Number(caps.zoom.max || 1);
+          zoomStep = Number(caps.zoom.step || 0.1) || 0.1;
+          currentZoom = Number((cameraTrack.getSettings && cameraTrack.getSettings().zoom) || zoomMin);
+          targetZoom = zoomMin;
+          maybeUpdateHardwareZoom();
+        }
+        if(caps.focusMode && cameraTrack.applyConstraints){
+          cameraTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function(){});
+        }
+      } catch(_e){
+        // Some browsers throw when probing capabilities.
+      }
+    }
+
+    scanVideoEl.srcObject = stream;
     camHolder.style.display = "none";
-    qrScanner = new Html5QrcodeScanner("reader", {fps:10, qrbox:250}, false);
-    qrScanner.render(onScanSuccess, function(e){ /* ignore scan errors */ });
     cameraOn = true;
     camBtn.textContent = "Stop Camera";
     camBtn.classList.add("secondary");
+    processingFlag = false;
+    scanOverlay.classList.add("hidden");
+    hideScanHint();
+    if(scanLoopId) cancelAnimationFrame(scanLoopId);
+    scanLoopId = requestAnimationFrame(scanFrameLoop);
+    log("Camera started.", "success");
+  })
+  .catch(function(err){
+    var msg = err && err.message ? err.message : "Unknown camera error";
+    if(err && err.name === "NotAllowedError"){
+      msg = "Camera permission denied. Allow camera access in browser site settings.";
+    } else if(err && err.name === "NotFoundError"){
+      msg = "No camera device found.";
+    } else if(err && err.name === "NotReadableError"){
+      msg = "Camera is busy (in use by another app).";
+    }
+    log("Camera error: " + msg, "error");
+    stopCamera();
+  });
+}
+
+function stopCamera(){
+  if(scanLoopId){
+    cancelAnimationFrame(scanLoopId);
+    scanLoopId = null;
   }
+  if(cameraStream){
+    cameraStream.getTracks().forEach(function(t){ t.stop(); });
+    cameraStream = null;
+  }
+  if(scanVideoEl) scanVideoEl.srcObject = null;
+  cameraOn = false;
+  camBtn.textContent = "Start Camera";
+  camBtn.classList.remove("secondary");
+  camHolder.style.display = "";
+  isDecodingFrame = false;
+  likelyQrStreak = 0;
+  hideScanHint();
+  resetAdaptiveCameraState();
+}
+
+function scanFrameLoop(ts){
+  if(!cameraOn || !scanVideoEl || !scanCanvasEl){
+    scanLoopId = null;
+    return;
+  }
+
+  if(processingFlag || isDecodingFrame || scanVideoEl.readyState < 2 || (ts - lastDecodeTs) < SCAN_INTERVAL_MS){
+    updateDigitalZoomVisualSmooth();
+    scanLoopId = requestAnimationFrame(scanFrameLoop);
+    return;
+  }
+
+  lastDecodeTs = ts;
+  isDecodingFrame = true;
+
+  var w = scanVideoEl.videoWidth || 0;
+  var h = scanVideoEl.videoHeight || 0;
+  if(!w || !h){
+    isDecodingFrame = false;
+    updateDigitalZoomVisualSmooth();
+    scanLoopId = requestAnimationFrame(scanFrameLoop);
+    return;
+  }
+
+  if(scanCanvasEl.width !== w) scanCanvasEl.width = w;
+  if(scanCanvasEl.height !== h) scanCanvasEl.height = h;
+  var ctx = scanCanvasEl.getContext("2d", { willReadFrequently: true });
+  if(!ctx){
+    isDecodingFrame = false;
+    updateDigitalZoomVisualSmooth();
+    scanLoopId = requestAnimationFrame(scanFrameLoop);
+    return;
+  }
+
+  ctx.drawImage(scanVideoEl, 0, 0, w, h);
+  var frame = ctx.getImageData(0, 0, w, h);
+
+  readBarcodesFn(frame, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
+    .then(function(results){
+      if(results && results.length > 0 && results[0].text){
+        likelyQrStreak = 0;
+        hideScanHint();
+        resetDigitalZoomVisual();
+        targetZoom = zoomMin;
+        maybeUpdateHardwareZoom();
+        onScanSuccess(results[0].text);
+        return;
+      }
+
+      if(!advancedScanEnabled){
+        likelyQrStreak = 0;
+        hideScanHint();
+        visualTargetZoom = 1;
+        if(zoomCap){
+          targetZoom = zoomMin;
+          maybeUpdateHardwareZoom();
+        }
+        return;
+      }
+
+      var likely = detectLikelyQrPresence(frame, w, h);
+      if(likely) likelyQrStreak = Math.min(likelyQrStreak + 1, 5);
+      else likelyQrStreak = Math.max(0, likelyQrStreak - 1);
+
+      var now = Date.now();
+      if(likelyQrStreak >= 2 && (now - lastHintTs) > 1800 && !processingFlag){
+        showScanHint("Possible QR seen. Move closer and hold steady.");
+        lastHintTs = now;
+      }
+
+       adaptScannerWhenLikelyQr();
+
+       if(likelyQrStreak >= 1 && !processingFlag){
+         return runSmartDecodeSweep(frame, w, h).then(function(foundText){
+           if(foundText){
+             likelyQrStreak = 0;
+             hideScanHint();
+             resetDigitalZoomVisual();
+             targetZoom = zoomMin;
+             maybeUpdateHardwareZoom();
+             onScanSuccess(foundText);
+           }
+         });
+       }
+
+       if(likelyQrStreak === 0 && zoomCap){
+         targetZoom = zoomMin;
+         maybeUpdateHardwareZoom();
+       }
+    })
+    .catch(function(){
+      // Ignore per-frame decode misses/errors to keep scanner smooth.
+    })
+    .finally(function(){
+      updateDigitalZoomVisualSmooth();
+      isDecodingFrame = false;
+      if(cameraOn) scanLoopId = requestAnimationFrame(scanFrameLoop);
+    });
 }
 
 function onScanSuccess(txt){
   if(processingFlag) return;
   processingFlag = true;
-  if(qrScanner) qrScanner.pause();
   log("QR detected! Processing...", "info");
   handleRawQR(txt);
 }
 
 function resetScanner(){
   scanOverlay.classList.add("hidden");
-  if(qrScanner) qrScanner.resume();
+  hideScanHint();
+  resetDigitalZoomVisual();
   processingFlag = false;
+  if(cameraOn && !scanLoopId) scanLoopId = requestAnimationFrame(scanFrameLoop);
   log("Ready for next tablet.", "info");
 }
 
@@ -326,14 +959,60 @@ function showSuccess(match, team){
 // ─── QR DATA PROCESSING ──────────────────────────────────────────────────────
 function handleRawQR(raw){
   var chunks = raw.split("#").filter(function(s){ return s.trim().length > 0; });
+  var accepted = [];
+  var batchSeen = Object.create(null);
+
+  chunks.forEach(function(chunk){
+    var normalized = chunk.trim();
+    var key = buildScanKey(normalized);
+    if(batchSeen[key]){
+      log("Duplicate code in same scan payload ignored (" + key + ").", "info");
+      return;
+    }
+    batchSeen[key] = true;
+
+    if(scanSavedKeys[key]){
+      log("Duplicate scan blocked (already saved this session): " + key, "error");
+      return;
+    }
+    if(scanInFlightKeys[key]){
+      log("Duplicate scan blocked (already processing): " + key, "info");
+      return;
+    }
+
+    scanInFlightKeys[key] = true;
+    accepted.push({ chunk: normalized, key: key });
+  });
+
+  if(accepted.length === 0){
+    log("No new match data to process from this scan.", "info");
+    processingFlag = false;
+    if(cameraOn && !scanLoopId) scanLoopId = requestAnimationFrame(scanFrameLoop);
+    return;
+  }
+
   var chain  = Promise.resolve(null);
   var last   = null;
-  chunks.forEach(function(c){
-    chain = chain.then(function(){ return processSingleMatch(c); }).then(function(r){ if(r) last = r; });
+  accepted.forEach(function(item){
+    chain = chain
+      .then(function(){ return processSingleMatch(item.chunk); })
+      .then(function(r){
+        delete scanInFlightKeys[item.key];
+        if(r){
+          scanSavedKeys[item.key] = true;
+          last = r;
+        }
+      })
+      .catch(function(){
+        delete scanInFlightKeys[item.key];
+      });
   });
   chain.then(function(){
     if(last){ showSuccess(last.match, last.team); fetchData(); }
-    else { if(qrScanner) qrScanner.resume(); processingFlag = false; }
+    else {
+      processingFlag = false;
+      if(cameraOn && !scanLoopId) scanLoopId = requestAnimationFrame(scanFrameLoop);
+    }
   });
 }
 
@@ -406,11 +1085,23 @@ function processSingleMatch(str){
         log("Match " + p[1] + " already saved. Skipped.", "info");
         return {match:p[1], team:p[2]};
       }
-      log("DB Error M" + p[1] + ": " + JSON.stringify(err), "error");
-      return null;
+      // If backend rejects for reasons other than unique conflict, keep local queue copy.
+      var queued = enqueuePendingReport(payload);
+      if(queued){
+        log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
+      }
+      return {match:p[1], team:p[2]};
     });
   })
-  .catch(function(e){ log("Crash parsing QR: " + e.message, "error"); return null; });
+  .catch(function(_e){
+    var queued = enqueuePendingReport(payload);
+    if(queued){
+      log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
+    } else {
+      log("Already queued offline: Match " + p[1] + " (Team " + p[2] + ").", "info");
+    }
+    return {match:p[1], team:p[2]};
+  });
 }
 
 // ─── DATA TABLE ──────────────────────────────────────────────────────────────
@@ -433,26 +1124,10 @@ function fetchData(){
       if (!r.user && r.username) sc = r.username;
       
       var mn = r.matchNumber || r.id;
-      return "<tr><td style='font-weight:bold;color:#0a84ff'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>Saved</td></tr>";
+      return "<tr><td style='font-weight:bold;color:#0a84ff;cursor:pointer;text-decoration:underline' onclick='printMatchReport("+Number(mn)+")' title='Print all 6 teams for this match'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>Saved</td></tr>";
     }).join("") || "<tr class='empty-row'><td colspan='4'>No matches yet.</td></tr>";
   })
   .catch(function(e){ log("Table sync error: " + e.message, "error"); });
-}
-
-// ─── PRINT LAYOUT TOGGLE ─────────────────────────────────────────────────────
-var printLayout = "expanded"; // "expanded" | "compact"
-
-function setLayout(mode){
-  printLayout = mode;
-  var expBtn = $("layout-expanded-btn");
-  var cmpBtn = $("layout-compact-btn");
-  if(mode === "expanded"){
-    expBtn.style.background = "#0a84ff"; expBtn.style.borderColor = "#0a84ff"; expBtn.style.color = "#fff";
-    cmpBtn.style.background = "#333";    cmpBtn.style.borderColor = "#555";    cmpBtn.style.color = "#aaa";
-  } else {
-    cmpBtn.style.background = "#0a84ff"; cmpBtn.style.borderColor = "#0a84ff"; cmpBtn.style.color = "#fff";
-    expBtn.style.background = "#333";    expBtn.style.borderColor = "#555";    expBtn.style.color = "#aaa";
-  }
 }
 
 // ─── PRINT ───────────────────────────────────────────────────────────────────
@@ -509,58 +1184,112 @@ function computeStatsFromMatches(matches){
   if(n === 0) return null;
 
   var totAutoHub=0, totAutoMiss=0, totTeleHub=0, totTeleFerry=0, totEndPts=0, totIncap=0;
-  var autoClimbCount=0, bumpCount=0, trenchCount=0, deadCount=0;
+  var maxAutoHub=0, maxAutoMiss=0, maxTeleHub=0, maxTeleFerry=0, maxEndPts=0, maxScore=0;
+  var bumpCount=0, trenchCount=0, deadCount=0;
+  var climbAttempts=0, climbSuccesses=0;
   var endLevelCounts = {0:0,1:0,2:0,3:0,"fail":0};
+  var startPosCounts = { Left:0, Center:0, Right:0, Unknown:0 };
+  var bestMatch = null;
 
   matches.forEach(function(r){
     var a = r.auto    || {};
     var t = r.teleop  || {};
     var e = r.endgame || {};
     var p = parsePackedNotes(r.notes);
+    var autoHub = parseInt(a.hubScores || 0, 10) || 0;
+    var autoMiss = parseInt(a.hubMisses || 0, 10) || 0;
+    var teleHub = parseInt(t.hubScores || 0, 10) || 0;
+    var teleFerry = parseInt(t.passes || p.ferry || 0, 10) || 0;
 
-    totAutoHub   += parseInt(a.hubScores || 0, 10) || 0;
-    totAutoMiss  += parseInt(a.hubMisses || 0, 10) || 0;
-    totTeleHub   += parseInt(t.hubScores || 0, 10) || 0;
-    totTeleFerry += parseInt(t.passes    || p.ferry || 0, 10) || 0;
+    totAutoHub   += autoHub;
+    totAutoMiss  += autoMiss;
+    totTeleHub   += teleHub;
+    totTeleFerry += teleFerry;
+    if(autoHub > maxAutoHub) maxAutoHub = autoHub;
+    if(autoMiss > maxAutoMiss) maxAutoMiss = autoMiss;
+    if(teleHub > maxTeleHub) maxTeleHub = teleHub;
+    if(teleFerry > maxTeleFerry) maxTeleFerry = teleFerry;
     
-    // Parse endgame level from notes manually if e.level is not supported by old backend 
-    // Usually saved as [Time:XX] or something, but wait, endgame action was not bundled in the notes?!
     var parsedLevel = 0;
     if (r.notes && r.notes.includes("Level 3")) parsedLevel = 3;
     else if (r.notes && r.notes.includes("Level 2")) parsedLevel = 2;
     else if (r.notes && r.notes.includes("Level 1")) parsedLevel = 1;
-    totEndPts    += parseInt(e.level || parsedLevel, 10) * 10 || 0;
+    var endPts = parseInt(e.level || parsedLevel, 10) * 10 || 0;
+    totEndPts += endPts;
+    if(endPts > maxEndPts) maxEndPts = endPts;
     
     totIncap     += parseInt(r.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
 
-    if(a.climb && a.climb !== "NONE") autoClimbCount++;
     if(r.overBump  || p.bump)   bumpCount++;
     if(r.underTrench || p.trench) trenchCount++;
     if(r.secondsIncapacitated > 0 || p.dead) deadCount++;
 
+    var start = (r.startingPosition || p.start || "Unknown").toString().toLowerCase();
+    if(start.indexOf("left") !== -1) startPosCounts.Left++;
+    else if(start.indexOf("center") !== -1 || start.indexOf("centre") !== -1) startPosCounts.Center++;
+    else if(start.indexOf("right") !== -1) startPosCounts.Right++;
+    else startPosCounts.Unknown++;
+
     var el = e.level || 0;
     if(e.climbFailed) endLevelCounts["fail"]++;
     else endLevelCounts[el] = (endLevelCounts[el]||0) + 1;
+
+    var attemptedClimb = !!(e.climbFailed || (parseInt(e.level || 0, 10) > 0));
+    if(attemptedClimb) climbAttempts++;
+    if(parseInt(e.level || 0, 10) > 0 && !e.climbFailed) climbSuccesses++;
+
+    var totalScore = autoHub * 2 + teleHub + endPts;
+    if(totalScore > maxScore){
+      maxScore = totalScore;
+      bestMatch = {
+        matchNumber: r.matchNumber || "?",
+        totalScore: totalScore,
+        auto: autoHub,
+        tele: teleHub,
+        end: endPts
+      };
+    }
   });
 
-  var avg = function(v){ return (v/n).toFixed(1); };
+  var avg = function(v){ return Number((v/n).toFixed(1)); };
   var pct = function(v){ return Math.round((v/n)*100) + "%"; };
+  var dominantStart = "Unknown";
+  var bestStartCount = -1;
+  ["Left", "Center", "Right", "Unknown"].forEach(function(pos){
+    if(startPosCounts[pos] > bestStartCount){
+      bestStartCount = startPosCounts[pos];
+      dominantStart = pos;
+    }
+  });
 
   return {
-    matches:       matches,          // keep raw for per-match table
+    matches:       matches,
     matchesPlayed: n,
     avgAutoHub:    avg(totAutoHub),
+    maxAutoHub:    maxAutoHub,
     avgAutoMiss:   avg(totAutoMiss),
+    maxAutoMiss:   maxAutoMiss,
     avgTeleHub:    avg(totTeleHub),
+    maxTeleHub:    maxTeleHub,
     avgFerry:      avg(totTeleFerry),
+    maxFerry:      maxTeleFerry,
     avgEndPts:     avg(totEndPts),
+    maxEndPts:     maxEndPts,
     avgScore:      avg(totAutoHub*2 + totTeleHub + totEndPts),
+    maxScore:      maxScore,
     avgIncap:      avg(totIncap),
-    autoClimbPct:  pct(autoClimbCount),
     bumpPct:       pct(bumpCount),
     trenchPct:     pct(trenchCount),
     deadPct:       pct(deadCount),
-    endLevelCounts: endLevelCounts
+    endLevelCounts: endLevelCounts,
+    climbAttempts: climbAttempts,
+    climbSuccesses: climbSuccesses,
+    climbFails: Math.max(0, climbAttempts - climbSuccesses),
+    climbTryFreq: climbAttempts + "/" + n,
+    climbSuccessFreq: climbSuccesses + "/" + n,
+    startPosCounts: startPosCounts,
+    dominantStart: dominantStart,
+    bestMatch: bestMatch
   };
 }
 
@@ -636,8 +1365,36 @@ function printTeamReport(){
   .catch(function(e){ log("Report error: " + e.message, "error"); console.error(e); });
 }
 
-// ── Expanded layout: stat cards + per-match cards ────────────────────────────
-function buildExpandedHTML(team, s){
+function fmtNum(v){
+  var n = Number(v || 0);
+  return n.toFixed(1);
+}
+
+function statCard(val, label, color){
+  return "<div style='text-align:center;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:14px 10px;min-width:95px'>" +
+    "<div style='font-size:24px;font-weight:bold;color:"+(color||"#111")+"'>"+val+"</div>" +
+    "<div style='font-size:11px;color:#666;margin-top:4px;text-transform:uppercase'>"+label+"</div></div>";
+}
+
+function buildAutoPositionHTML(s){
+  var total = Math.max(1, s.matchesPlayed);
+  var bar = function(label, count, color){
+    var pct = Math.round((count / total) * 100);
+    return "<div style='margin:8px 0'>" +
+      "<div style='display:flex;justify-content:space-between;font-size:12px'><b>"+label+"</b><span>"+count+" / "+total+" ("+pct+"%)</span></div>" +
+      "<div style='height:10px;background:#eee;border-radius:6px;overflow:hidden'><div style='height:10px;background:"+color+";width:"+pct+"%'></div></div>" +
+    "</div>";
+  };
+  return "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:10px'>" +
+    "<div style='font-size:13px;font-weight:bold;margin-bottom:6px'>Auto Start Position Emphasis</div>" +
+    "<div style='font-size:12px;color:#555;margin-bottom:8px'>Dominant Start: <b>"+s.dominantStart+"</b></div>" +
+    bar("Left", s.startPosCounts.Left, "#ff6b6b") +
+    bar("Center", s.startPosCounts.Center, "#0a84ff") +
+    bar("Right", s.startPosCounts.Right, "#22c55e") +
+  "</div>";
+}
+
+function buildTeamSummaryHTML(team, s){
   var statCard = function(val, label, color){
     return "<div style='text-align:center;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:16px 10px;min-width:90px'>" +
       "<div style='font-size:26px;font-weight:bold;color:"+(color||"#111")+"'>"+val+"</div>" +
@@ -646,141 +1403,464 @@ function buildExpandedHTML(team, s){
 
   var el = s.endLevelCounts;
   var endDist = "L0:"+el[0]+" L1:"+el[1]+" L2:"+el[2]+" L3:"+el[3]+" Fail:"+el["fail"];
-
-  var matchCards = s.matches.map(function(r){
-    var p   = parsePackedNotes(r.notes);
-    var a   = r.auto    || {};
-    var t   = r.teleop  || {};
-    var scouter = (r.user && r.user.firstName) ? r.user.firstName : "?";
-    var dead = r.secondsIncapacitated > 0;
-    var borderColor = dead ? "#ff3b30" : "#ddd";
-
-    return "<div style='border:1px solid "+borderColor+";border-radius:8px;padding:14px;margin-bottom:12px;"+(dead?"background:#fff5f5":"background:#fff")+"'>" +
-      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>" +
-        "<span style='font-size:16px;font-weight:bold'>Q"+(r.matchNumber||"?")+"</span>" +
-        "<span style='font-size:12px;color:#888'>Scouted by "+scouter+"</span>" +
-        (dead?"<span style='background:#ff3b30;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold'>DIED "+r.secondsIncapacitated+"s</span>":"") +
-      "</div>" +
-      "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:13px'>" +
-        "<div><b>Auto</b><br>Start: "+(r.startingPosition || p.start || "?")+"<br>Hub: "+(parseInt(a.hubScores, 10)||0)+" makes / "+(parseInt(a.hubMisses, 10)||0)+" miss<br>Pass Vol: "+(p.pass||"?")+"<br>Climb: "+climbLabel(a.climb)+"<br>Auto Win: "+(p.autoWin||"?")+"</div>" +
-        "<div><b>Teleop</b><br>Hub: "+(parseInt(t.hubScores, 10)||0)+" hits<br>Misses: "+(parseInt(t.hubMisses, 10)||0)+"<br>Ferry: "+(parseInt(t.passes, 10)||parseInt(p.ferry, 10)||0)+"<br>Bump: "+(r.overBump||p.bump?"✓":"✗")+"<br>Trench: "+(r.underTrench||p.trench?"✓":"✗")+"</div>" +
-        "<div><b>Endgame</b><br>Result: "+endLabel(r)+"<br>Climb Time: "+(p.climbTime||"?")+"s<br><br><span style='color:#555;font-style:italic;font-size:11px'>"+(p.scouterNote||"—")+"</span></div>" +
-      "</div></div>";
-  }).join("");
+  var best = s.bestMatch || { matchNumber: "?", totalScore: 0, auto: 0, tele: 0, end: 0 };
 
   return "<h1 style='margin-bottom:4px'>Team "+team+", Scouting Report</h1>" +
     "<p style='color:#888;margin:0 0 20px;font-size:13px'>"+s.matchesPlayed+" matches scouted &nbsp;|&nbsp; Generated "+new Date().toLocaleDateString()+"</p>" +
 
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Averages Per Match</h2>" +
-    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
-      statCard(s.avgScore,    "Avg Total",  "#0a84ff") +
-      statCard(s.avgAutoHub,  "Auto Makes", "#ff9500") +
-      statCard(s.avgAutoMiss, "Auto Miss",  "#ff3b30") +
-      statCard(s.avgTeleHub,  "Tele Hits",  "#34c759") +
-      statCard(s.avgFerry,    "Ferry Vol",  "#5856d6") +
-      statCard(s.avgEndPts,   "End Pts",    "#ff6b35") +
-      statCard(s.avgIncap,    "Incap Sec",  "#ff3b30") +
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Best Match / Max Scored</h2>" +
+    "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:18px;background:#fdfdfd'>" +
+      "<div style='font-size:18px;font-weight:bold'>Best Match: Q"+best.matchNumber+"</div>" +
+      "<div style='font-size:14px;margin-top:6px'>Max Total: <b style='color:#0a84ff'>"+best.totalScore+"</b> &nbsp;|&nbsp; Auto: "+best.auto+" &nbsp; Tele: "+best.tele+" &nbsp; End: "+best.end+"</div>" +
+      "<div style='font-size:12px;color:#666;margin-top:4px'>Absolute max scored observed: <b>"+s.maxScore+"</b></div>" +
     "</div>" +
 
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Consistency</h2>" +
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Auto and Tele (Avg / Max)</h2>" +
     "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
-      statCard(s.autoClimbPct, "Auto Climb", "#ff9500") +
+      statCard(fmtNum(s.avgScore),      "Avg Total", "#0a84ff") +
+      statCard(s.maxScore,              "Max Total", "#0a84ff") +
+      statCard(fmtNum(s.avgAutoHub),    "Avg Auto",  "#ff9500") +
+      statCard(s.maxAutoHub,            "Max Auto",  "#ff9500") +
+      statCard(fmtNum(s.avgTeleHub),    "Avg Tele",  "#34c759") +
+      statCard(s.maxTeleHub,            "Max Tele",  "#34c759") +
+      statCard(fmtNum(s.avgAutoMiss),   "Avg A Miss", "#ff3b30") +
+      statCard(s.maxAutoMiss,           "Max A Miss", "#ff3b30") +
+      statCard(fmtNum(s.avgFerry),      "Avg Ferry", "#5856d6") +
+      statCard(s.maxFerry,              "Max Ferry", "#5856d6") +
+    "</div>" +
+
+    buildAutoPositionHTML(s) +
+
+    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px;margin-top:16px'>Climb Frequency (No Percent)</h2>" +
+    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
+      statCard(s.climbTryFreq,  "Try Climb", "#ff9500") +
+      statCard(s.climbSuccessFreq, "Succeed Climb", "#22c55e") +
+      statCard(s.climbAttempts, "Climb Attempts", "#555") +
+      statCard(s.climbSuccesses, "Climb Success", "#22c55e") +
+      statCard(s.climbFails, "Climb Fails", "#ff3b30") +
       statCard(s.bumpPct,      "Bump Cross", "#555") +
       statCard(s.trenchPct,    "Trench",     "#555") +
       statCard(s.deadPct,      "Died",       "#ff3b30") +
+      statCard(fmtNum(s.avgIncap), "Avg Incap Sec", "#ff3b30") +
     "</div>" +
 
-    "<p style='font-size:12px;color:#888;margin-bottom:6px'><b>Endgame distribution:</b> "+endDist+"</p>" +
-
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px;margin-top:20px'>Per-Match Breakdown</h2>" +
-    matchCards;
+    "<p style='font-size:12px;color:#888;margin-bottom:6px'><b>Endgame distribution:</b> "+endDist+"</p>";
 }
-
-// ── Compact layout: one dense table row per match ────────────────────────────
-function buildCompactHTML(team, s){
-  var th = function(label){ return "<th style='"+COMPACT_TH+"'>"+label+"</th>"; };
-  var td = function(val, bold, color){
-    return "<td style='"+COMPACT_TD+(color?";color:"+color:"")+(bold?";font-weight:bold":"")+"'>"+val+"</td>";
-  };
-
-  var rows = s.matches.map(function(r){
-    var p   = parsePackedNotes(r.notes);
-    var a   = r.auto    || {};
-    var t   = r.teleop  || {};
-    var dead = r.secondsIncapacitated > 0;
-    var scouter = (r.user && r.user.firstName) ? r.user.firstName : "?";
-    var autoScore = (parseInt(a.hubScores, 10)||0)*2;
-    var teleScore = (parseInt(t.hubScores, 10)||0);
-    
-    var parsedLevel = 0;
-    if (r.notes && r.notes.includes("Level 3")) parsedLevel = 3;
-    else if (r.notes && r.notes.includes("Level 2")) parsedLevel = 2;
-    else if (r.notes && r.notes.includes("Level 1")) parsedLevel = 1;
-    var endScore  = (parseInt(r.endgame && r.endgame.level, 10)||parsedLevel||0)*10;
-    
-    var total     = autoScore + teleScore + endScore;
-    var rowBg     = dead ? "background:#fff5f5" : "";
-
-    return "<tr style='"+rowBg+"'>" +
-      td("Q"+(r.matchNumber||"?"), true) +
-      td(r.startingPosition || p.start || "?") +
-      td((parseInt(a.hubScores, 10)||0)+" / "+(parseInt(a.hubMisses, 10)||0)) +
-      td(p.pass||"?") +
-      td(climbLabel(a.climb)) +
-      td(p.autoWin||"?") +
-      td(parseInt(t.hubScores, 10)||0) +
-      td(parseInt(t.passes, 10)||parseInt(p.ferry, 10)||0) +
-      td((r.overBump||p.bump?"✓":"✗")) +
-      td((r.underTrench||p.trench?"✓":"✗")) +
-      td(endLabel(r)) +
-      td(dead ? (r.secondsIncapacitated || p.deadTime) + "s" : "—", false, dead?"#ff3b30":null) +
-      td(total, true, "#0a84ff") +
-      td(scouter, false, "#888") +
-      td('<span style="font-size:10px;color:#666">'+(p.scouterNote||"—")+'</span>') +
-    "</tr>";
-  }).join("");
-
-  var avgRow = "<tr style='background:#f0f0f0;font-weight:bold'>" +
-    "<td style='"+COMPACT_TD+"'>AVG</td>" +
-    "<td style='"+COMPACT_TD+"'>—</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgAutoHub+" makes</td>" +
-    "<td style='"+COMPACT_TD+"'>—</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.autoClimbPct+"</td>" +
-    "<td style='"+COMPACT_TD+"'>—</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgTeleHub+"</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgFerry+"</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.bumpPct+"</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.trenchPct+"</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgEndPts+"pts</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgIncap+"s</td>" +
-    "<td style='"+COMPACT_TD+"'>"+s.avgScore+"</td>" +
-    "<td style='"+COMPACT_TD+"'>—</td>" +
-    "<td style='"+COMPACT_TD+"'>—</td></tr>";
-
-  return "<h1 style='margin-bottom:4px'>Team "+team+" — Compact Report</h1>" +
-    "<p style='color:#888;margin:0 0 14px;font-size:13px'>"+s.matchesPlayed+" matches &nbsp;|&nbsp; "+new Date().toLocaleDateString()+"</p>" +
-    "<table style='width:100%;border-collapse:collapse;font-size:12px'>" +
-      "<thead><tr style='background:#222;color:#fff'>" +
-        th("Match")+th("Start")+th("Auto H/M")+th("Pass")+th("AClimb")+th("AWin")+
-        th("TeleHits")+th("Ferry")+th("Bump")+th("Trench")+th("Endgame")+
-        th("Dead")+th("Total")+th("Scout")+th("Notes") +
-      "</tr></thead><tbody>" +
-      rows + avgRow +
-    "</tbody></table>";
-}
-
-var COMPACT_TH = "padding:6px 8px;text-align:left;font-size:11px;white-space:nowrap";
-var COMPACT_TD = "padding:5px 8px;border-bottom:1px solid #eee;font-size:12px;white-space:nowrap";
 
 function renderTeamPrint(team, s, isFallback){
   var disclaimer = isFallback
     ? "<p style='color:#888;font-size:12px;border:1px solid #ddd;padding:8px;border-radius:4px;margin-bottom:14px'>&#9432; Stats computed directly from raw match records.</p>"
     : "";
-  var body = disclaimer + (printLayout === "compact" ? buildCompactHTML(team, s) : buildExpandedHTML(team, s));
-  var extraStyle = printLayout === "compact"
-    ? "@media print{@page{size:landscape}}"
-    : "";
-  openPrint(body, extraStyle);
+  var body = disclaimer + buildTeamSummaryHTML(team, s);
+  openPrint(body, "");
+}
+
+function getStoredTbaConfig(){
+  var eventKey = (($("tba-event-key-input") && $("tba-event-key-input").value) || localStorage.getItem(TBA_EVENT_KEY_STORAGE) || "").trim();
+  var runtimeApiKey = (window && window.TBA_API_KEY) ? String(window.TBA_API_KEY) : "";
+  var apiKey = (($("tba-api-key-input") && $("tba-api-key-input").value) || runtimeApiKey || "").trim();
+  return { eventKey: eventKey, apiKey: apiKey };
+}
+
+function persistTbaConfig(eventKey, apiKey){
+  if(eventKey) localStorage.setItem(TBA_EVENT_KEY_STORAGE, eventKey);
+}
+
+function buildScheduleMapFromTbaMatches(tbaMatches){
+  var out = {};
+  tbaMatches.forEach(function(m){
+    if(m.comp_level !== "qm") return;
+    var red = (m.alliances && m.alliances.red && m.alliances.red.team_keys) || [];
+    var blue = (m.alliances && m.alliances.blue && m.alliances.blue.team_keys) || [];
+    var matchNum = Number(m.match_number);
+    out[matchNum] = {
+      Red1: red[0] ? red[0].replace("frc", "") : "",
+      Red2: red[1] ? red[1].replace("frc", "") : "",
+      Red3: red[2] ? red[2].replace("frc", "") : "",
+      Blue1: blue[0] ? blue[0].replace("frc", "") : "",
+      Blue2: blue[1] ? blue[1].replace("frc", "") : "",
+      Blue3: blue[2] ? blue[2].replace("frc", "") : ""
+    };
+  });
+  return out;
+}
+
+function loadScheduleFromCache(eventKey){
+  try {
+    var raw = localStorage.getItem(TBA_SCHEDULE_CACHE_PREFIX + eventKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch(_e){
+    return null;
+  }
+}
+
+function saveScheduleToCache(eventKey, scheduleMap){
+  try {
+    localStorage.setItem(TBA_SCHEDULE_CACHE_PREFIX + eventKey, JSON.stringify(scheduleMap));
+  } catch(_e){
+    // Ignore localStorage write errors.
+  }
+}
+
+function ensureScheduleMap(eventKey, apiKey){
+  var cached = loadScheduleFromCache(eventKey);
+  if(cached && Object.keys(cached).length > 0) return Promise.resolve(cached);
+  if(!eventKey || !apiKey) return Promise.resolve(null);
+
+  return fetchTimeout("https://www.thebluealliance.com/api/v3/event/" + eventKey + "/matches/simple", {
+    headers: { "X-TBA-Auth-Key": apiKey }
+  })
+  .then(function(res){
+    if(!res.ok) throw new Error("TBA schedule fetch failed (" + res.status + ")");
+    return res.json();
+  })
+  .then(function(matches){
+    var map = buildScheduleMapFromTbaMatches(matches || []);
+    saveScheduleToCache(eventKey, map);
+    return map;
+  })
+  .catch(function(err){
+    log("Schedule fetch warning: " + err.message, "error");
+    return null;
+  });
+}
+
+function fetchAllFullReports(){
+  return fetchTimeout(API_URL + "/reports?take=2000&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+  .then(function(r){ return r.json(); })
+  .then(function(all){
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    all = (all || []).filter(function(d){ return (d.id || Infinity) > hideId; });
+    var fullMatchPromises = all.map(function(m){
+      return fetchTimeout(API_URL + "/report/" + m.id, {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+        .then(function(res){ return res.json(); })
+        .catch(function(){ return m; });
+    });
+    return Promise.all(fullMatchPromises);
+  });
+}
+
+function detectConflictsForTeamMatch(reports){
+  var conflicts = [];
+  if(!reports || reports.length <= 1) return conflicts;
+
+  var autoVals = reports.map(function(r){ return parseInt((r.auto && r.auto.hubScores) || 0, 10) || 0; });
+  var teleVals = reports.map(function(r){ return parseInt((r.teleop && r.teleop.hubScores) || 0, 10) || 0; });
+  var starts = reports.map(function(r){
+    var p = parsePackedNotes(r.notes);
+    return ((r.startingPosition || p.start || "Unknown") + "").toUpperCase();
+  });
+  var minAuto = Math.min.apply(Math, autoVals);
+  var maxAuto = Math.max.apply(Math, autoVals);
+  var minTele = Math.min.apply(Math, teleVals);
+  var maxTele = Math.max.apply(Math, teleVals);
+
+  if((maxAuto - minAuto) >= 8) conflicts.push("Auto score disagreement (range " + minAuto + "-" + maxAuto + ")");
+  if((maxTele - minTele) >= 10) conflicts.push("Tele score disagreement (range " + minTele + "-" + maxTele + ")");
+
+  var uniqueStarts = Object.create(null);
+  starts.forEach(function(s){ uniqueStarts[s] = true; });
+  if(Object.keys(uniqueStarts).length > 1) conflicts.push("Start position disagreement");
+
+  return conflicts;
+}
+
+function normalizeStationName(raw){
+  if(!raw) return "";
+  var s = String(raw).trim().toLowerCase().replace(/\s+/g, "");
+  if(s === "red1" || s === "r1") return "Red1";
+  if(s === "red2" || s === "r2") return "Red2";
+  if(s === "red3" || s === "r3") return "Red3";
+  if(s === "blue1" || s === "b1") return "Blue1";
+  if(s === "blue2" || s === "b2") return "Blue2";
+  if(s === "blue3" || s === "b3") return "Blue3";
+  return "";
+}
+
+function extractScoutStation(report){
+  if(!report) return "";
+
+  // Try direct fields if backend stores station.
+  var direct = normalizeStationName(
+    report.station ||
+    report.scoutStation ||
+    (report.user && (report.user.station || report.user.scoutStation || report.user.position)) ||
+    report.position
+  );
+  if(direct) return direct;
+
+  // Try notes payload patterns.
+  var notes = String(report.notes || "");
+  var m = notes.match(/\[(?:Station|Seat|ScoutStation):([^\]]+)\]/i);
+  if(m && m[1]){
+    var parsed = normalizeStationName(m[1]);
+    if(parsed) return parsed;
+  }
+
+  // Optional username convention fallback like "red1_scout".
+  var uname = String((report.user && (report.user.username || report.user.firstName)) || report.username || "");
+  var byName = normalizeStationName(uname);
+  if(byName) return byName;
+
+  return "";
+}
+
+function buildLayoutFromScoutingInfo(matchReports){
+  var layout = { Red1:"", Red2:"", Red3:"", Blue1:"", Blue2:"", Blue3:"" };
+  var usedTeams = Object.create(null);
+
+  (matchReports || []).forEach(function(r){
+    if(!r || !r.teamNumber) return;
+    var station = extractScoutStation(r);
+    var team = String(r.teamNumber);
+    if(!station) return;
+    if(layout[station] && layout[station] !== team) return;
+    layout[station] = team;
+    usedTeams[team] = true;
+  });
+
+  // Fill any missing slots with unmatched teams in this match.
+  var unmatchedTeams = Array.from(new Set((matchReports || [])
+    .filter(function(r){ return r && r.teamNumber; })
+    .map(function(r){ return String(r.teamNumber); })
+    .filter(function(team){ return !usedTeams[team]; })));
+
+  ["Red1","Red2","Red3","Blue1","Blue2","Blue3"].forEach(function(slot){
+    if(!layout[slot] && unmatchedTeams.length > 0){
+      layout[slot] = unmatchedTeams.shift();
+    }
+  });
+
+  return layout;
+}
+
+function teamBoxHtml(slot, teamNum, teamStats, matchReports, conflictLines){
+  if(!teamNum){
+    return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fafafa'>" +
+      "<div style='font-weight:bold'>" + slot + "</div><div style='color:#888'>No team mapped</div></div>";
+  }
+  var s = teamStats || {
+    avgAutoHub: 0, maxAutoHub: 0,
+    avgTeleHub: 0, maxTeleHub: 0,
+    bestMatch: { matchNumber: "?", totalScore: 0 },
+    climbAttempts: 0, climbSuccesses: 0,
+    dominantStart: "Unknown",
+    matchesPlayed: 0
+  };
+
+  var currentMatchAuto = 0;
+  var currentMatchTele = 0;
+  if(matchReports && matchReports.length > 0){
+    var picked = matchReports[0];
+    currentMatchAuto = parseInt((picked.auto && picked.auto.hubScores) || 0, 10) || 0;
+    currentMatchTele = parseInt((picked.teleop && picked.teleop.hubScores) || 0, 10) || 0;
+  }
+
+  var conflictBlock = conflictLines.length
+    ? "<div style='margin-top:6px;font-size:11px;color:#b91c1c'><b>Conflicts:</b> " + conflictLines.join("; ") + "</div>"
+    : "<div style='margin-top:6px;font-size:11px;color:#15803d'>No major conflicts</div>";
+
+  return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fff'>" +
+    "<div style='display:flex;justify-content:space-between;align-items:center'><div style='font-weight:bold'>"+slot+" - Team "+teamNum+"</div><div style='font-size:11px;color:#666'>"+s.matchesPlayed+" total matches</div></div>" +
+    "<div style='font-size:12px;margin-top:6px'>Current match: Auto <b>"+currentMatchAuto+"</b>, Tele <b>"+currentMatchTele+"</b></div>" +
+    "<div style='font-size:12px;margin-top:4px'>Auto Avg/Max: <b>"+fmtNum(s.avgAutoHub)+" / "+s.maxAutoHub+"</b> &nbsp; | &nbsp; Tele Avg/Max: <b>"+fmtNum(s.avgTeleHub)+" / "+s.maxTeleHub+"</b></div>" +
+    "<div style='font-size:12px;margin-top:4px'>Best Match: <b>Q"+(s.bestMatch ? s.bestMatch.matchNumber : "?")+" ("+(s.bestMatch ? s.bestMatch.totalScore : 0)+")</b> &nbsp; | &nbsp; Climb Try/Succeed: <b>"+s.climbAttempts+" / "+s.climbSuccesses+"</b></div>" +
+    "<div style='font-size:12px;margin-top:4px'>Dominant Auto Start: <b>"+s.dominantStart+"</b></div>" +
+    conflictBlock +
+  "</div>";
+}
+
+function buildAllianceSummary(name, slots, teamStatsByNumber){
+  var vals = slots.map(function(slot){
+    var t = teamStatsByNumber[slot.team];
+    return {
+      auto: t ? Number(t.avgAutoHub || 0) : 0,
+      tele: t ? Number(t.avgTeleHub || 0) : 0,
+      total: t ? Number(t.avgScore || 0) : 0
+    };
+  });
+  var count = Math.max(1, vals.length);
+  var sumAuto = vals.reduce(function(a, b){ return a + b.auto; }, 0);
+  var sumTele = vals.reduce(function(a, b){ return a + b.tele; }, 0);
+  var sumTotal = vals.reduce(function(a, b){ return a + b.total; }, 0);
+  return {
+    name: name,
+    avg3Auto: (sumAuto / count).toFixed(1),
+    avg3Tele: (sumTele / count).toFixed(1),
+    avg3Total: (sumTotal / count).toFixed(1)
+  };
+}
+
+function buildMatchReportHTML(matchNum, redSlots, blueSlots, teamStatsByNumber, matchReportsByTeam, allConflicts){
+  var redSummary = buildAllianceSummary("Red", redSlots, teamStatsByNumber);
+  var blueSummary = buildAllianceSummary("Blue", blueSlots, teamStatsByNumber);
+
+  var redHtml = redSlots.map(function(slot){
+    return teamBoxHtml(slot.slot, slot.team, teamStatsByNumber[slot.team], matchReportsByTeam[slot.team] || [], slot.conflicts || []);
+  }).join("");
+  var blueHtml = blueSlots.map(function(slot){
+    return teamBoxHtml(slot.slot, slot.team, teamStatsByNumber[slot.team], matchReportsByTeam[slot.team] || [], slot.conflicts || []);
+  }).join("");
+
+  var conflictHtml = allConflicts.length
+    ? "<ul style='margin:6px 0 0 18px;padding:0'>" + allConflicts.map(function(c){ return "<li>" + c + "</li>"; }).join("") + "</ul>"
+    : "<div style='color:#15803d'>No major conflicts detected for this match.</div>";
+
+  return "<h1 style='margin-bottom:4px'>Match "+matchNum+" - All 6 Team Report</h1>" +
+    "<p style='color:#666;margin-top:0'>One-page view with Red/Blue grouping, position mapping, team summaries, and conflicts.</p>" +
+    "<div style='display:grid;grid-template-columns:1fr 1fr;gap:14px'>" +
+      "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;background:#fff5f5'>" +
+        "<h2 style='margin:0 0 8px 0;color:#b91c1c'>Red Alliance</h2>" +
+        "<div style='font-size:12px;margin-bottom:8px'><b>3-Team Avg:</b> Auto "+redSummary.avg3Auto+" | Tele "+redSummary.avg3Tele+" | Total "+redSummary.avg3Total+"</div>" +
+        redHtml +
+      "</div>" +
+      "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;background:#eff6ff'>" +
+        "<h2 style='margin:0 0 8px 0;color:#1d4ed8'>Blue Alliance</h2>" +
+        "<div style='font-size:12px;margin-bottom:8px'><b>3-Team Avg:</b> Auto "+blueSummary.avg3Auto+" | Tele "+blueSummary.avg3Tele+" | Total "+blueSummary.avg3Total+"</div>" +
+        blueHtml +
+      "</div>" +
+    "</div>" +
+    "<h2 style='margin-top:14px'>Conflicts</h2>" +
+    conflictHtml;
+}
+
+function printMatchReportFromInput(){
+  var matchNum = parseInt((($("print-match-input") && $("print-match-input").value) || ""), 10);
+  if(!matchNum || isNaN(matchNum)){
+    alert("Enter a valid match number.");
+    return;
+  }
+  printMatchReport(matchNum);
+}
+
+function printMatchReport(matchNum){
+  if(!AUTH_TOKEN){
+    alert("Please connect to backend first.");
+    return;
+  }
+
+  var tba = getStoredTbaConfig();
+  persistTbaConfig(tba.eventKey, tba.apiKey);
+
+  log("Building one-page report for Match " + matchNum + "...", "info");
+
+  fetchAllFullReports()
+    .then(function(fullReports){
+      var reports = fullReports || [];
+      var reportsByTeam = {};
+      reports.forEach(function(r){
+        if(!r || !r.teamNumber) return;
+        var team = String(r.teamNumber);
+        if(!reportsByTeam[team]) reportsByTeam[team] = [];
+        reportsByTeam[team].push(r);
+      });
+
+      var matchReports = reports.filter(function(r){ return Number(r.matchNumber) === Number(matchNum); });
+      var scoutingLayout = buildLayoutFromScoutingInfo(matchReports);
+
+      return ensureScheduleMap(tba.eventKey, tba.apiKey)
+        .then(function(scheduleMap){
+          return {
+            fullReports: reports,
+            reportsByTeam: reportsByTeam,
+            scheduleMap: scheduleMap,
+            scoutingLayout: scoutingLayout
+          };
+        });
+    })
+    .then(function(ctx){
+      var fullReports = ctx.fullReports;
+      var reportsByTeam = ctx.reportsByTeam;
+      var scheduleMap = ctx.scheduleMap || {};
+      var scoutingLayout = ctx.scoutingLayout || { Red1:"", Red2:"", Red3:"", Blue1:"", Blue2:"", Blue3:"" };
+
+      var layout = {
+        Red1: scoutingLayout.Red1 || "",
+        Red2: scoutingLayout.Red2 || "",
+        Red3: scoutingLayout.Red3 || "",
+        Blue1: scoutingLayout.Blue1 || "",
+        Blue2: scoutingLayout.Blue2 || "",
+        Blue3: scoutingLayout.Blue3 || ""
+      };
+
+      var hasFullScoutingLayout = !!(layout.Red1 && layout.Red2 && layout.Red3 && layout.Blue1 && layout.Blue2 && layout.Blue3);
+      if(!hasFullScoutingLayout && scheduleMap[matchNum]){
+        var fromSchedule = scheduleMap[matchNum];
+        layout.Red1 = layout.Red1 || String(fromSchedule.Red1 || "");
+        layout.Red2 = layout.Red2 || String(fromSchedule.Red2 || "");
+        layout.Red3 = layout.Red3 || String(fromSchedule.Red3 || "");
+        layout.Blue1 = layout.Blue1 || String(fromSchedule.Blue1 || "");
+        layout.Blue2 = layout.Blue2 || String(fromSchedule.Blue2 || "");
+        layout.Blue3 = layout.Blue3 || String(fromSchedule.Blue3 || "");
+      }
+
+      var fallbackTeams = fullReports
+        .filter(function(r){ return Number(r.matchNumber) === Number(matchNum); })
+        .map(function(r){ return String(r.teamNumber); });
+      var uniqueFallback = Array.from(new Set(fallbackTeams));
+
+      if(!(layout.Red1 && layout.Red2 && layout.Red3 && layout.Blue1 && layout.Blue2 && layout.Blue3)){
+        if(!layout.Red1) layout.Red1 = uniqueFallback[0] || "";
+        if(!layout.Red2) layout.Red2 = uniqueFallback[1] || "";
+        if(!layout.Red3) layout.Red3 = uniqueFallback[2] || "";
+        if(!layout.Blue1) layout.Blue1 = uniqueFallback[3] || "";
+        if(!layout.Blue2) layout.Blue2 = uniqueFallback[4] || "";
+        if(!layout.Blue3) layout.Blue3 = uniqueFallback[5] || "";
+
+        if(uniqueFallback.length < 6){
+          log("Could not map all 6 teams for this match from scouting data.", "error");
+        }
+      }
+
+      var teamStatsByNumber = {};
+      Object.keys(reportsByTeam).forEach(function(team){
+        var stats = computeStatsFromMatches(reportsByTeam[team]);
+        if(stats) teamStatsByNumber[team] = stats;
+      });
+
+      var reportsInMatchByTeam = {};
+      fullReports.forEach(function(r){
+        if(Number(r.matchNumber) !== Number(matchNum) || !r.teamNumber) return;
+        var team = String(r.teamNumber);
+        if(!reportsInMatchByTeam[team]) reportsInMatchByTeam[team] = [];
+        reportsInMatchByTeam[team].push(r);
+      });
+
+      var allConflicts = [];
+      function slotObj(slotName){
+        var team = String(layout[slotName] || "");
+        var teamReportsThisMatch = reportsInMatchByTeam[team] || [];
+        var conflicts = detectConflictsForTeamMatch(teamReportsThisMatch);
+        conflicts.forEach(function(c){ allConflicts.push(slotName + " Team " + team + ": " + c); });
+        return { slot: slotName, team: team, conflicts: conflicts };
+      }
+
+      var redSlots = [slotObj("Red1"), slotObj("Red2"), slotObj("Red3")];
+      var blueSlots = [slotObj("Blue1"), slotObj("Blue2"), slotObj("Blue3")];
+
+      var redDominants = redSlots.map(function(s){ return (teamStatsByNumber[s.team] && teamStatsByNumber[s.team].dominantStart) || "Unknown"; });
+      var blueDominants = blueSlots.map(function(s){ return (teamStatsByNumber[s.team] && teamStatsByNumber[s.team].dominantStart) || "Unknown"; });
+      [
+        { name: "Red", vals: redDominants },
+        { name: "Blue", vals: blueDominants }
+      ].forEach(function(a){
+        var counts = {};
+        a.vals.forEach(function(v){
+          if(!v || v === "Unknown") return;
+          counts[v] = (counts[v] || 0) + 1;
+        });
+        Object.keys(counts).forEach(function(k){
+          if(counts[k] >= 2) allConflicts.push(a.name + " alliance auto-position congestion: " + counts[k] + " teams favor " + k);
+        });
+      });
+
+      var html = buildMatchReportHTML(matchNum, redSlots, blueSlots, teamStatsByNumber, reportsInMatchByTeam, allConflicts);
+      openPrint(html, "@media print{@page{size:landscape}} body{font-size:12px}");
+      log("Match " + matchNum + " report ready.", "success");
+    })
+    .catch(function(err){
+      log("Match report error: " + err.message, "error");
+    });
 }
 
 function printRankings(){
@@ -852,8 +1932,8 @@ function printRankings(){
 
     // Sort descending by highest metric
     if (metric === "avgAutoMiss" || metric === "avgIncap") {
-      // For misses and incapacitation, lower is better usually, but maybe they want to see the highest? 
-      // User said "highest average among everything, or highest scores, highest msises" so we keep descending.
+      // For misses and incapacitation, lower is better usually, but who knows maybe highest might be needed 
+      
       rankingsList.sort(function(a, b) { return b[metric] - a[metric]; });
     } else {
       rankingsList.sort(function(a, b) { return b[metric] - a[metric]; });
@@ -890,13 +1970,45 @@ function openPrint(html, extraStyle){
 // ─── FILE UPLOAD ─────────────────────────────────────────────────────────────
 fileInput.addEventListener("change", function(e){
   if(!e.target.files.length) return;
-  if(!qrLibLoaded){ log("QR library not loaded yet.", "error"); return; }
-  var reader = new Html5Qrcode("reader");
-  reader.scanFile(e.target.files[0], true)
-    .then(function(txt){ onScanSuccess(txt); })
-    .catch(function(){ log("Could not read QR from image.", "error"); });
+  if(!qrLibLoaded || !readBarcodesFn){ log("QR library not loaded yet.", "error"); return; }
+  var file = e.target.files[0];
+  readBarcodesFn(file, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
+    .then(function(results){
+      if(results && results.length > 0 && results[0].text){
+        onScanSuccess(results[0].text);
+      } else {
+        log("Could not read QR from image.", "error");
+      }
+    })
+    .catch(function(err){
+      log("Could not read QR from image: " + (err && err.message ? err.message : "Unknown error"), "error");
+    });
   e.target.value = "";
 });
+
+if(advancedScanToggle){
+  advancedScanToggle.checked = true;
+  advancedScanToggle.addEventListener("change", function(e){
+    setAdvancedScanEnabled(e.target.checked);
+  });
+}
+
+// Boot offline queue and auto-sync when browser comes back online.
+loadPendingReports();
+if($("tba-event-key-input")){
+  $("tba-event-key-input").value = localStorage.getItem(TBA_EVENT_KEY_STORAGE) || "";
+}
+if($("tba-api-key-input")){
+  var runtimeApiKey = (window && window.TBA_API_KEY) ? String(window.TBA_API_KEY) : "";
+  $("tba-api-key-input").value = runtimeApiKey;
+}
+window.addEventListener("online", function(){
+  log("Network restored. Trying to sync offline reports...", "info");
+  flushPendingReports();
+});
+window.addEventListener("resize", normalizeCameraViewport);
+window.addEventListener("orientationchange", normalizeCameraViewport);
+normalizeCameraViewport();
 </script>
 </body>
 </html>
