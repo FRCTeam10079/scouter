@@ -41,6 +41,17 @@ tr:hover{background:rgba(255,255,255,.05)}
 .check-icon{font-size:60px;margin-bottom:10px}
 .scan-msg{font-size:20px;font-weight:bold;margin-bottom:5px}
 .scan-detail{font-size:14px;color:#aaa}
+@media print {
+  body { background:#fff;color:#111;font-family:'Segoe UI','Helvetica Neue',sans-serif;padding:20px }
+  h1,h2,h3 { color:#111 }
+  h1 { font-size:24px;margin-bottom:4px }
+  h2 { font-size:16px;margin-top:18px;border-bottom:2px solid #ddd }
+  h3 { font-size:13px;font-weight:600 }
+  p { color:#333;line-height:1.5 }
+  ul { color:#333 }
+  div { color:#333 }
+  a { color:#0066cc }
+}
 </style>
 </head>
 <body>
@@ -149,6 +160,7 @@ tr:hover{background:rgba(255,255,255,.05)}
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 var API_URL = "https://6k0bvq8z-8000.usw2.devtunnels.ms";
+
 var TIMEOUT  = 5000;
 var SCAN_INTERVAL_MS = 120;
 var SMART_DECODE_INTERVAL_MS = 420;
@@ -1371,80 +1383,61 @@ function fmtNum(v){
 }
 
 function statCard(val, label, color){
-  return "<div style='text-align:center;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:14px 10px;min-width:95px'>" +
-    "<div style='font-size:24px;font-weight:bold;color:"+(color||"#111")+"'>"+val+"</div>" +
-    "<div style='font-size:11px;color:#666;margin-top:4px;text-transform:uppercase'>"+label+"</div></div>";
+  return "<div style='display:inline-block;margin-right:16px;margin-bottom:12px'>" +
+    "<div style='font-size:28px;font-weight:700;color:"+(color||"#222")+"'>"+val+"</div>" +
+    "<div style='font-size:12px;color:#666;margin-top:2px'>"+label+"</div></div>";
 }
 
 function buildAutoPositionHTML(s){
   var total = Math.max(1, s.matchesPlayed);
-  var bar = function(label, count, color){
-    var pct = Math.round((count / total) * 100);
-    return "<div style='margin:8px 0'>" +
-      "<div style='display:flex;justify-content:space-between;font-size:12px'><b>"+label+"</b><span>"+count+" / "+total+" ("+pct+"%)</span></div>" +
-      "<div style='height:10px;background:#eee;border-radius:6px;overflow:hidden'><div style='height:10px;background:"+color+";width:"+pct+"%'></div></div>" +
-    "</div>";
-  };
-  return "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin-top:10px'>" +
-    "<div style='font-size:13px;font-weight:bold;margin-bottom:6px'>Auto Start Position Emphasis</div>" +
-    "<div style='font-size:12px;color:#555;margin-bottom:8px'>Dominant Start: <b>"+s.dominantStart+"</b></div>" +
-    bar("Left", s.startPosCounts.Left, "#ff6b6b") +
-    bar("Center", s.startPosCounts.Center, "#0a84ff") +
-    bar("Right", s.startPosCounts.Right, "#22c55e") +
+  var left = Math.round((s.startPosCounts.Left / total) * 100);
+  var center = Math.round((s.startPosCounts.Center / total) * 100);
+  var right = Math.round((s.startPosCounts.Right / total) * 100);
+  
+  return "<div style='margin-top:20px'>" +
+    "<h3 style='margin:0 0 8px;font-size:14px;color:#333'>Auto Start Positions</h3>" +
+    "<p style='margin:0 0 12px;font-size:13px;color:#666'>Team prefers to start at <b>"+s.dominantStart+"</b>. Out of "+total+" matches:</p>" +
+    "<ul style='margin:8px 0;padding-left:20px;font-size:12px;color:#444'>" +
+      "<li>Left: "+s.startPosCounts.Left+" times ("+left+"%)</li>" +
+      "<li>Center: "+s.startPosCounts.Center+" times ("+center+"%)</li>" +
+      "<li>Right: "+s.startPosCounts.Right+" times ("+right+"%)</li>" +
+    "</ul>" +
   "</div>";
 }
 
 function buildTeamSummaryHTML(team, s){
-  var statCard = function(val, label, color){
-    return "<div style='text-align:center;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:16px 10px;min-width:90px'>" +
-      "<div style='font-size:26px;font-weight:bold;color:"+(color||"#111")+"'>"+val+"</div>" +
-      "<div style='font-size:11px;color:#666;margin-top:4px;text-transform:uppercase'>"+label+"</div></div>";
-  };
-
   var el = s.endLevelCounts;
-  var endDist = "L0:"+el[0]+" L1:"+el[1]+" L2:"+el[2]+" L3:"+el[3]+" Fail:"+el["fail"];
   var best = s.bestMatch || { matchNumber: "?", totalScore: 0, auto: 0, tele: 0, end: 0 };
-
-  return "<h1 style='margin-bottom:4px'>Team "+team+", Scouting Report</h1>" +
-    "<p style='color:#888;margin:0 0 20px;font-size:13px'>"+s.matchesPlayed+" matches scouted &nbsp;|&nbsp; Generated "+new Date().toLocaleDateString()+"</p>" +
-
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Best Match / Max Scored</h2>" +
-    "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:18px;background:#fdfdfd'>" +
-      "<div style='font-size:18px;font-weight:bold'>Best Match: Q"+best.matchNumber+"</div>" +
-      "<div style='font-size:14px;margin-top:6px'>Max Total: <b style='color:#0a84ff'>"+best.totalScore+"</b> &nbsp;|&nbsp; Auto: "+best.auto+" &nbsp; Tele: "+best.tele+" &nbsp; End: "+best.end+"</div>" +
-      "<div style='font-size:12px;color:#666;margin-top:4px'>Absolute max scored observed: <b>"+s.maxScore+"</b></div>" +
+  
+  var climbSummary = el["fail"] > 0 ? "struggled with climb ("+el["fail"]+" fails)" : "solid climber";
+  var climbStr = el[3] > 0 ? "Level 3" : (el[2] > 0 ? "Level 2" : (el[1] > 0 ? "Level 1" : "rarely climbs"));
+  
+  return "<h1 style='margin:0 0 6px;font-size:28px;font-weight:700'>Team "+team+"</h1>" +
+    "<p style='color:#666;margin:0 0 18px;font-size:13px'>"+s.matchesPlayed+" matches analyzed • Last report "+new Date().toLocaleDateString()+"</p>" +
+    
+    "<div style='background:#f5f5f5;border-left:4px solid #0a84ff;padding:14px;margin-bottom:24px'>" +
+      "<p style='margin:0;font-size:14px'><b>Team summary:</b> This team averages <b>"+fmtNum(s.avgScore)+" points</b> per match with a high of <b>"+s.maxScore+"</b> (Match Q"+best.matchNumber+"). They typically "+climbStr+" and "+climbSummary+".</p>" +
     "</div>" +
-
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px'>Auto and Tele (Avg / Max)</h2>" +
-    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
-      statCard(fmtNum(s.avgScore),      "Avg Total", "#0a84ff") +
-      statCard(s.maxScore,              "Max Total", "#0a84ff") +
-      statCard(fmtNum(s.avgAutoHub),    "Avg Auto",  "#ff9500") +
-      statCard(s.maxAutoHub,            "Max Auto",  "#ff9500") +
-      statCard(fmtNum(s.avgTeleHub),    "Avg Tele",  "#34c759") +
-      statCard(s.maxTeleHub,            "Max Tele",  "#34c759") +
-      statCard(fmtNum(s.avgAutoMiss),   "Avg A Miss", "#ff3b30") +
-      statCard(s.maxAutoMiss,           "Max A Miss", "#ff3b30") +
-      statCard(fmtNum(s.avgFerry),      "Avg Ferry", "#5856d6") +
-      statCard(s.maxFerry,              "Max Ferry", "#5856d6") +
+    
+    "<h3 style='margin:20px 0 8px;font-size:15px;font-weight:600'>Scoring Overview</h3>" +
+    "<div style='font-size:13px;line-height:1.6;margin-bottom:20px;color:#333'>" +
+      "<p style='margin:6px 0'><b>Auto Phase:</b> Averages "+fmtNum(s.avgAutoHub)+" hits (max "+s.maxAutoHub+"), with "+fmtNum(s.avgAutoMiss)+" misses</p>" +
+      "<p style='margin:6px 0'><b>Teleop Phase:</b> Averages "+fmtNum(s.avgTeleHub)+" hits (max "+s.maxTeleHub+"), ferry volume "+fmtNum(s.avgFerry)+" (max "+s.maxFerry+")</p>" +
     "</div>" +
-
+    
     buildAutoPositionHTML(s) +
-
-    "<h2 style='border-bottom:1px solid #ddd;padding-bottom:6px;margin-top:16px'>Climb Frequency (No Percent)</h2>" +
-    "<div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px'>" +
-      statCard(s.climbTryFreq,  "Try Climb", "#ff9500") +
-      statCard(s.climbSuccessFreq, "Succeed Climb", "#22c55e") +
-      statCard(s.climbAttempts, "Climb Attempts", "#555") +
-      statCard(s.climbSuccesses, "Climb Success", "#22c55e") +
-      statCard(s.climbFails, "Climb Fails", "#ff3b30") +
-      statCard(s.bumpPct,      "Bump Cross", "#555") +
-      statCard(s.trenchPct,    "Trench",     "#555") +
-      statCard(s.deadPct,      "Died",       "#ff3b30") +
-      statCard(fmtNum(s.avgIncap), "Avg Incap Sec", "#ff3b30") +
+    
+    "<h3 style='margin:20px 0 8px;font-size:15px;font-weight:600'>Endgame & Reliability</h3>" +
+    "<div style='font-size:13px;line-height:1.6;margin-bottom:20px;color:#333'>" +
+      "<p style='margin:6px 0'><b>Climb attempts:</b> "+s.climbAttempts+" times, "+s.climbSuccesses+" successful ("+s.climbTryFreq+"%)</p>" +
+      "<p style='margin:6px 0'><b>Climb levels:</b> L3: "+el[3]+" | L2: "+el[2]+" | L1: "+el[1]+" | L0: "+el[0]+" | Failed: "+el["fail"]+"</p>" +
+      "<p style='margin:6px 0'><b>Mobility:</b> Bump crosses "+s.bumpPct+"% of time, Trench "+s.trenchPct+"%</p>" +
+      "<p style='margin:6px 0'><b>Reliability:</b> Robot died in "+s.deadPct+"% of matches (avg "+fmtNum(s.avgIncap)+" sec downtime)</p>" +
     "</div>" +
-
-    "<p style='font-size:12px;color:#888;margin-bottom:6px'><b>Endgame distribution:</b> "+endDist+"</p>";
+    
+    "<div style='font-size:12px;color:#888;margin-top:24px;padding-top:12px;border-top:1px solid #ddd'>" +
+      "<p style='margin:0'>Report generated for team analysis. Use this alongside direct observations from events.</p>" +
+    "</div>";
 }
 
 function renderTeamPrint(team, s, isFallback){

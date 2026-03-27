@@ -185,6 +185,34 @@ class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
   }
 }
 
+// Helper: Calculate average team score from history
+const calculateAverageTeamScore = (historyQueue: HistoryItem[], targetTeam: string): number => {
+  const teamMatches = historyQueue.filter(item => item.teamNum === targetTeam);
+  if (teamMatches.length === 0) return 0;
+
+  let totalScore = 0;
+  teamMatches.forEach(item => {
+    try {
+      const data = JSON.parse(item.qrString);
+      // Estimate score: (autoMake * 5) + (teleMake * 2) + (teleFerry * 2)
+      const autoScore = (data.autoMake || 0) * 5;
+      const teleScore = (data.teleMake || 0) * 2 + (data.teleFerry || 0) * 2;
+      totalScore += autoScore + teleScore;
+    } catch (e) {
+      // Skip if can't parse
+    }
+  });
+
+  return Math.round(totalScore / teamMatches.length);
+};
+
+// Helper: Suggest ball increment based on average score
+const suggestBallIncrement = (avgScore: number): number => {
+  if (avgScore > 200) return 10;
+  if (avgScore > 100) return 5;
+  return 3;
+};
+
 // Screens
 const LoginView = ({ errorMessage, username, setUsername, handleLogin, handleSignUp, handleOfflineLogin, isLoading, password, setPassword, firstName, setFirstName, lastName, setLastName, isSignUpMode, setIsSignUpMode, teamPassword, setTeamPassword, apiUrlInput, setApiUrlInput, onSaveApiUrl }: any) => (
   <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
@@ -409,7 +437,7 @@ const DashboardView = ({
   );
 };
 
-const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => {
+const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrement }: any) => {
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -458,8 +486,8 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
 
           <View style={styles.divider} />
 
-          {/* Counters go up by 5 here */}
-          <CounterRow label="Makes (Fuel) +5" value={form.autoMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
+          {/* Counters go up by configured ballIncrement here */}
+          <CounterRow label={`Makes (Fuel) +${ballIncrement}`} value={form.autoMake} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
           <CounterRow label="Miss (Fuel)" value={form.autoMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMiss: Math.max(0, p.autoMiss + v) }))} />
           
           <Text style={styles.label}>Pass Volume</Text>
@@ -501,9 +529,9 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel }: any) => 
 
           <View style={styles.divider} />
 
-          <CounterRow label="Hits (Fuel) +5" value={form.teleMake} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
+          <CounterRow label={`Hits (Fuel) +${ballIncrement}`} value={form.teleMake} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
           <CounterRow label="Misses" value={form.teleMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMiss: Math.max(0, p.teleMiss + v) }))} />
-          <CounterRow label="Ferry Volume" value={form.teleFerry} step={5} onChange={(v: number) => setForm((p: any) => ({ ...p, teleFerry: Math.max(0, p.teleFerry + v) }))} />
+          <CounterRow label={`Ferry Volume +${ballIncrement}`} value={form.teleFerry} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleFerry: Math.max(0, p.teleFerry + v) }))} />
 
           <View style={styles.divider} />
 
@@ -598,6 +626,7 @@ export default function App() {
   const [masterSeatKey, setMasterSeatKey] = useState('SC-TEAM-SEAT'); // default key format
   const [newMasterKeyInput, setNewMasterKeyInput] = useState('');
   const [textCompression, setTextCompression] = useState('Default');
+  const [ballIncrement, setBallIncrement] = useState(5); // Configure ball increment for faster scoring
 
   // User shift preferences
   const [station, setStation] = useState<Station | ''>('');
@@ -647,6 +676,9 @@ export default function App() {
     });
     AsyncStorage.getItem('@master_seat_key').then(k => {
       if (k) setMasterSeatKey(k);
+    });
+    AsyncStorage.getItem('@ball_increment').then(bi => {
+      if (bi) setBallIncrement(parseInt(bi, 10));
     });
     AsyncStorage.getItem('@refresh_token').then(t => {
       if (t) setRefreshToken(t);
@@ -1018,9 +1050,10 @@ export default function App() {
       {/* Settings Modal */}
       <Modal visible={isSettingsOpen} animationType="slide" transparent={true}>
         <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
+          <View style={[styles.modalContent, { maxHeight: '90%', paddingBottom: 20 }]}>
             <Text style={styles.modalTitle}>Settings / Seat Admin</Text>
             
+            <ScrollView style={{ width: '100%' }} contentContainerStyle={{ paddingBottom: 20 }} showsVerticalScrollIndicator={true}>
             <View style={{ marginBottom: 30, width: '100%' }}>
               <Text style={styles.label}>Unlock Seat Selection</Text>
               <Text style={{ color: '#888', fontSize: 12, marginBottom: 5 }}>Only leads should know this code.</Text>
@@ -1132,6 +1165,54 @@ export default function App() {
             </View>
 
             <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
+              <Text style={styles.label}>Ball Increment Setting</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 10 }}>
+                Adjust how many balls/fuel increment per button press
+              </Text>
+
+              {/* Calculate current average score to show suggestion */}
+              {(() => {
+                const avgScore = form.teamNumber ? calculateAverageTeamScore(historyQueue, form.teamNumber) : 0;
+                const suggested = avgScore > 0 ? suggestBallIncrement(avgScore) : 5;
+                return (
+                  <>
+                    {avgScore > 0 && (
+                      <View style={{ backgroundColor: '#1a3a2a', padding: 10, borderRadius: 8, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#4cd964' }}>
+                        <Text style={{ color: '#4cd964', fontWeight: 'bold', fontSize: 12 }}>
+                          Team {form.teamNumber} Avg Score: {avgScore} pts
+                        </Text>
+                        <Text style={{ color: '#aaa', fontSize: 11, marginTop: 4 }}>
+                          Suggested increment: +{suggested}
+                        </Text>
+                      </View>
+                    )}
+                  </>
+                );
+              })()}
+
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                {[1, 3, 5, 10].map(inc => (
+                  <TouchableOpacity
+                    key={inc}
+                    style={[
+                      styles.optionBtn,
+                      { flex: 1, alignItems: 'center' },
+                      ballIncrement === inc ? styles.optionBtnActive : null
+                    ]}
+                    onPress={async () => {
+                      setBallIncrement(inc);
+                      await AsyncStorage.setItem('@ball_increment', inc.toString());
+                    }}
+                  >
+                    <Text style={[styles.optionBtnText, ballIncrement === inc ? styles.textActive : null]}>
+                      +{inc}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={{ marginBottom: 30, width: '100%', borderTopWidth: 1, borderTopColor: '#333', paddingTop: 15 }}>
               <TouchableOpacity
                 style={{ backgroundColor: '#2b5c35', padding: 15, borderRadius: 8, alignItems: 'center' }}
                 onPress={() => {
@@ -1142,8 +1223,9 @@ export default function App() {
                 <Text style={{ color: 'white', fontWeight: 'bold' }}>Open Overview of Past Match Details</Text>
               </TouchableOpacity>
             </View>
+            </ScrollView>
             
-            <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444' }]} onPress={() => setIsSettingsOpen(false)}>
+            <TouchableOpacity style={[styles.closeBtn, { backgroundColor: '#444', marginTop: 10 }]} onPress={() => setIsSettingsOpen(false)}>
               <Text style={styles.closeBtnText}>Close Settings</Text>
             </TouchableOpacity>
           </View>
@@ -1329,7 +1411,8 @@ export default function App() {
           setForm={setForm} 
           station={station} 
           onSave={handleSaveMatch} 
-          onCancel={() => setCurrentView('dashboard')} 
+          onCancel={() => setCurrentView('dashboard')}
+          ballIncrement={ballIncrement}
         />
       )}
       
