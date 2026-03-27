@@ -68,6 +68,7 @@ interface MatchData {
   teleFerry: number;
   bumpCross: boolean;
   trenchCross: boolean;
+  defended: boolean;
   incapacitated: boolean;
   teleNotes: string;
   deadTime: string;
@@ -90,7 +91,7 @@ const INITIAL_MATCH_DATA: MatchData = {
   station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
   autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false }, autoNotes: '',
   autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
-  trenchCross: false, incapacitated: false, teleNotes: '',
+  trenchCross: false, defended: false, incapacitated: false, teleNotes: '',
   deadTime: '', endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
 };
 
@@ -530,9 +531,10 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
 
           <View style={styles.divider} />
 
-          <Text style={styles.label}>Crossings</Text>
+          <Text style={styles.label}>Crossings & Play</Text>
           <ToggleRow label="Bump" checked={form.bumpCross} onToggle={() => setForm((p: any) => ({ ...p, bumpCross: !p.bumpCross }))} />
           <ToggleRow label="Trench" checked={form.trenchCross} onToggle={() => setForm((p: any) => ({ ...p, trenchCross: !p.trenchCross }))} />
+          <ToggleRow label="Defended?" checked={form.defended} onToggle={() => setForm((p: any) => ({ ...p, defended: !p.defended }))} />
 
           <View style={styles.divider} />
 
@@ -836,13 +838,13 @@ export default function App() {
 
     const effectiveDeadTime = form.incapacitated ? (form.deadTime || "150") : "0";
     
-    let extraData = `[Start:${form.startPos}] [Pass:${form.autoPassVol}] [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] [Bump:${form.bumpCross}] [Trench:${form.trenchCross}] [Time:${form.climbTime || "0"}s] [Dead:${form.incapacitated ? 'DIE' : 'OK'}]`;
+    let extraData = `[Start:${form.startPos}] [Pass:${form.autoPassVol}] [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] [Bump:${form.bumpCross}] [Trench:${form.trenchCross}] [Defended:${form.defended}] [Time:${form.climbTime || "0"}s] [Dead:${form.incapacitated ? 'DIE' : 'OK'}]`;
     let parsedNotes = form.notes.replace(/\|/g, ''); 
 
     // Prevent any delimiters breaking the payload
     const safeAutoNotes = form.autoNotes.replace(/\|/g, '');
     const safeTeleNotes = form.teleNotes.replace(/\|/g, '');
-    const fullNotes = `${extraData} | ${parsedNotes}`;
+    const fullNotes = parsedNotes ? parsedNotes : `${extraData} | `;
 
     // Assemble the QR string EXACTLY matching the indices expected by scanner.html
     const dataString = [
@@ -865,7 +867,8 @@ export default function App() {
       form.incapacitated ? 'DIE' : 'OK',                         // 16 
       fullNotes,                                                 // 17 (Notes)
       safeAutoNotes,                                             // 18 (Auto Notes specifically)
-      safeTeleNotes                                              // 19 (Teleop Notes specifically)
+      safeTeleNotes,                                             // 19 (Teleop Notes specifically)
+      form.defended                                              // 20
     ].join('|');
 
     // Attempt to submit to backend real-time matching the required schema strictly
@@ -899,7 +902,7 @@ export default function App() {
         hubMisses: form.teleMiss,
         level: 0,
         climbFailed: false,
-        defended: false,
+        defended: form.defended,
         passes: form.teleFerry
       },
       endgame: {

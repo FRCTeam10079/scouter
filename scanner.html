@@ -1096,9 +1096,32 @@ function processSingleMatch(str){
   }
 
   // Support old schema vs new schema (indexes 18 & 19 contain pure auto and teleop notes respectively)
-  var rawNotes = p[17] || "";
+  var payloadNotes = p[17] || "";
   var autoNotes = p[18] || "";
   var teleNotes = p[19] || "";
+
+  var extra =
+    "[Start:" +
+    (p[4] || "CENTER") +
+    "] [Pass:" +
+    (p[8] || "None") +
+    "] [AutoWin:" +
+    (p[9] || "Tie") +
+    "] [Ferry:" +
+    (p[11] || 0) +
+    "] [Bump:" +
+    (p[12] || "false").toString() +
+    "] [Trench:" +
+    (p[13] || "false").toString() +
+    "] [Defended:" +
+    (p[20] || "false").toString() +
+    "] [Time:" +
+    (p[15] || "0") +
+    "s] [Dead:" +
+    (p[16] || "OK") +
+    "]";
+    
+  var rawNotes = payloadNotes ? payloadNotes : extra + " | ";
 
   var deadFromFlag = (p[16] === "DIE") ? 150 : 0;
   var deadFromNotes = 0;
@@ -1127,7 +1150,7 @@ function processSingleMatch(str){
     teleop:{
       notes: teleNotes.substring(0,400),
       hubScores: parseInt(p[10],10)||0, hubMisses:0, level:0,
-      climbFailed:false, defended:false, passes: parseInt(p[11],10)||0
+      climbFailed:false, defended: p[20]==="true" || p[20]==="1", passes: parseInt(p[11],10)||0
     },
     endgame:{
       notes:"",
@@ -1230,6 +1253,7 @@ function parsePackedNotes(notesStr){
   out.ferry   = extract("Ferry", "F");
   out.bump    = boolVal(extract("Bump", "B"));
   out.trench  = boolVal(extract("Trench", "T"));
+  out.defended = boolVal(extract("Defended", "D"));
   out.dead    = boolVal(extract("Dead", "X"));
   out.deadTime= extract("DeadTime", "dT") || "0";
   out.climbTime = extract("Time", "t");
@@ -1245,7 +1269,7 @@ function computeStatsFromMatches(matches){
 
   var totAutoHub=0, totAutoMiss=0, totTeleHub=0, totTeleFerry=0, totEndPts=0, totIncap=0;
   var maxAutoHub=0, maxAutoMiss=0, maxTeleHub=0, maxTeleFerry=0, maxEndPts=0, maxScore=0;
-  var bumpCount=0, trenchCount=0, deadCount=0;
+  var bumpCount=0, trenchCount=0, deadCount=0, defendedCount=0;
   var climbAttempts=0, climbSuccesses=0;
   var endLevelCounts = {0:0,1:0,2:0,3:0,"fail":0};
   var startPosCounts = { Left:0, Center:0, Right:0, Unknown:0 };
@@ -1282,6 +1306,7 @@ function computeStatsFromMatches(matches){
 
     if(r.overBump  || p.bump)   bumpCount++;
     if(r.underTrench || p.trench) trenchCount++;
+    if(t.defended || p.defended) defendedCount++;
     if(r.secondsIncapacitated > 0 || p.dead) deadCount++;
 
     var start = (r.startingPosition || p.start || "Unknown").toString().toLowerCase();
@@ -1340,6 +1365,7 @@ function computeStatsFromMatches(matches){
     avgIncap:      avg(totIncap),
     bumpPct:       pct(bumpCount),
     trenchPct:     pct(trenchCount),
+    defendedPct:   pct(defendedCount),
     deadPct:       pct(deadCount),
     endLevelCounts: endLevelCounts,
     climbAttempts: climbAttempts,
@@ -1479,7 +1505,7 @@ function buildTeamSummaryHTML(team, s){
     "<div style='font-size:13px;line-height:1.6;margin-bottom:20px;color:#333'>" +
       "<p style='margin:6px 0'><b>Climb attempts:</b> "+s.climbAttempts+" times, "+s.climbSuccesses+" successful ("+s.climbTryFreq+"%)</p>" +
       "<p style='margin:6px 0'><b>Climb levels:</b> L3: "+el[3]+" | L2: "+el[2]+" | L1: "+el[1]+" | L0: "+el[0]+" | Failed: "+el["fail"]+"</p>" +
-      "<p style='margin:6px 0'><b>Mobility:</b> Bump crosses "+s.bumpPct+"% of time, Trench "+s.trenchPct+"%</p>" +
+      "<p style='margin:6px 0'><b>Mobility & Play:</b> Bump: "+s.bumpPct+" | Trench: "+s.trenchPct+" | Defended: "+s.defendedPct+"</p>" +
       "<p style='margin:6px 0'><b>Reliability:</b> Robot died in "+s.deadPct+"% of matches (avg "+fmtNum(s.avgIncap)+" sec downtime)</p>" +
     "</div>" +
     
