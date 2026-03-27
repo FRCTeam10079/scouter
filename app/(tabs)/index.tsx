@@ -17,30 +17,24 @@ import {
 } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import PitScoutingView from './PitScoutingView';
-// WORKS!!!!  https://6k0bvq8z-8000.usw2.devtunnels.ms
+
 // App setup and configuration
-// If you're testing on a real phone, remember to swap 'localhost' with your computer's local IP address
-// const API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms/' ;
-// my computer ip address 192.168.1.55
-const DEFAULT_API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms' ;// Default if nothing saved
-// Does not work on school wifi as it blocks the connection
-// go to wifi ip create a vs code port make it public copy forwared address
+const DEFAULT_API_URL = 'https://6k0bvq8z-8000.usw2.devtunnels.ms';
 
 // How many matches a scouter should do before we remind them to take a break
 const SHIFT_LENGTH = 12; 
 
 // A default schedule (empty) to start with.
-// We will load the real schedule from Settings -> Paste JSON
 const DEFAULT_SCHEDULE: any = {};
 
-// Static lists for our UI buttons so React doesn't recreate them on every single render
+// Static lists for our UI buttons
 const STATIONS = ['Red1', 'Red2', 'Red3', 'Blue1', 'Blue2', 'Blue3'];
 const AUTO_POSITIONS = ['Left', 'Center', 'Right'];
 const PASS_VOLUMES = ['None', 'Low', 'Med', 'High'];
 const AUTO_WINNERS = ['Red', 'Blue', 'Tie'];
 const ENDGAME_ACTIONS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Failed'];
 
-// Helper: fetch with a timeout so it doesn't hang forever on unreachable hosts
+// Helper: fetch with a timeout
 const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 8000) => {
   return Promise.race([
     fetch(url, options),
@@ -48,16 +42,6 @@ const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 8000) => {
       setTimeout(() => reject(new Error(`Request timed out after ${timeoutMs / 1000}s`)), timeoutMs)
     )
   ]);
-};
-
-// The baseline state for a new match. We keep this here so we can easily reset the form later.
-const INITIAL_MATCH_DATA: MatchData = {
-  scouter: '', eventCode: '2026A', matchType: 'Qual', matchNumber: '1', teamNumber: '',
-  station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
-  autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false },
-  autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
-  trenchCross: false, incapacitated: false,
-  deadTime: '', endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
 };
 
 // Data models
@@ -77,6 +61,7 @@ interface MatchData {
   autoPassVol: 'None' | 'Low' | 'Med' | 'High';
   autoClimb: 'None' | 'Yes' | 'Fail';
   autoCollect: { outpost: boolean; depot: boolean; neutral: boolean };
+  autoNotes: string;
   autoWinner: 'Red' | 'Blue' | 'Tie' | 'Unknown';
   teleMake: number;
   teleMiss: number;
@@ -84,6 +69,7 @@ interface MatchData {
   bumpCross: boolean;
   trenchCross: boolean;
   incapacitated: boolean;
+  teleNotes: string;
   deadTime: string;
   endgameAction: 'None' | 'Level 1' | 'Level 2' | 'Level 3' | 'Failed';
   climbTime: string;
@@ -97,6 +83,16 @@ interface HistoryItem {
   teamNum: string;
   qrString: string;
 }
+
+// The baseline state for a new match.
+const INITIAL_MATCH_DATA: MatchData = {
+  scouter: '', eventCode: '2026A', matchType: 'Qual', matchNumber: '1', teamNumber: '',
+  station: 'Red1', startPos: 'Center', autoMake: 0, autoMiss: 0, autoPassVol: 'None', 
+  autoClimb: 'None', autoCollect: { outpost: false, depot: false, neutral: false }, autoNotes: '',
+  autoWinner: 'Unknown', teleMake: 0, teleMiss: 0, teleFerry: 0, bumpCross: false, 
+  trenchCross: false, incapacitated: false, teleNotes: '',
+  deadTime: '', endgameAction: 'None', climbTime: '', fouls: 0, notes: ''
+};
 
 // Reusable mini-components to keep our main screen code clean
 const CounterRow = ({ label, value, onChange, step = 1 }: any) => (
@@ -153,12 +149,8 @@ class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
   }
 
   render() {
-    // A standard V40 QR Code can technically hold up to 4K alphanumeric characters,
-    // but react-native-qrcode-svg will crash earlier depending on strictness.
     const isTooBig = this.props.value && this.props.value.length > 2000;
     const windowDim = Dimensions.get('window');
-    
-    // Fit within width, but don't grow taller than the screen minus the headers and buttons
     const qrSize = this.props.size || Math.min(windowDim.width - 80, windowDim.height - 300);
 
     if (this.state.hasError || isTooBig) {
@@ -185,7 +177,6 @@ class QRCodeWrapper extends React.Component<any, { hasError: boolean }> {
   }
 }
 
-// Helper: Calculate average team score from history
 const calculateAverageTeamScore = (historyQueue: HistoryItem[], targetTeam: string): number => {
   const teamMatches = historyQueue.filter(item => item.teamNum === targetTeam);
   if (teamMatches.length === 0) return 0;
@@ -193,20 +184,16 @@ const calculateAverageTeamScore = (historyQueue: HistoryItem[], targetTeam: stri
   let totalScore = 0;
   teamMatches.forEach(item => {
     try {
-      const data = JSON.parse(item.qrString);
-      // Estimate score: (autoMake * 5) + (teleMake * 2) + (teleFerry * 2)
-      const autoScore = (data.autoMake || 0) * 5;
-      const teleScore = (data.teleMake || 0) * 2 + (data.teleFerry || 0) * 2;
+      const parts = item.qrString.split('|');
+      const autoScore = (parseInt(parts[5] || '0', 10)) * 5;
+      const teleScore = (parseInt(parts[10] || '0', 10)) * 2 + (parseInt(parts[11] || '0', 10)) * 2;
       totalScore += autoScore + teleScore;
-    } catch (e) {
-      // Skip if can't parse
-    }
+    } catch (e) {}
   });
 
   return Math.round(totalScore / teamMatches.length);
 };
 
-// Helper: Suggest ball increment based on average score
 const suggestBallIncrement = (avgScore: number): number => {
   if (avgScore > 200) return 10;
   if (avgScore > 100) return 5;
@@ -339,7 +326,6 @@ const DashboardView = ({
   textCompression,
   setTextCompression
 }: any) => {
-  // Turn the progress bar red if they are working past their shift limit
   const progress = Math.min((matchesScouted / SHIFT_LENGTH) * 100, 100);
   const barColor = progress >= 100 ? '#ff3b30' : '#4cd964';
 
@@ -400,7 +386,7 @@ const DashboardView = ({
                 if (isSeatUnlocked) {
                   setStation(s);
                   await AsyncStorage.setItem('@scout_station', s);
-                  setIsSeatUnlocked(false); // Lock it back up immediately after selection
+                  setIsSeatUnlocked(false); 
                   Alert.alert("Seat Locked", `You are now assigned to ${s}. Seat selection is locked.`);
                 } else {
                   Alert.alert("Locked", "Seat selection is locked. Ask a lead to unlock it in Settings.");
@@ -414,7 +400,6 @@ const DashboardView = ({
         </View>
       </View>
 
-      {/* Show an alert border if they have unsynced matches waiting to be scanned */}
       <View style={[styles.cardSection, matchQueue.length > 0 ? { borderColor: '#ffcc00', borderWidth: 1 } : {}]}>
         <Text style={[styles.placeholderText, { fontWeight: 'bold', color: matchQueue.length > 0 ? '#ffcc00' : '#888' }]}>
           Matches waiting to scan: {matchQueue.length}
@@ -486,7 +471,6 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
 
           <View style={styles.divider} />
 
-          {/* Counters go up by configured ballIncrement here */}
           <CounterRow label={`Makes (Fuel) +${ballIncrement}`} value={form.autoMake} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
           <CounterRow label="Miss (Fuel)" value={form.autoMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMiss: Math.max(0, p.autoMiss + v) }))} />
           
@@ -514,6 +498,17 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
             <OptionButton label="YES" selected={form.autoClimb === 'Yes'} onPress={() => setForm((p: any) => ({ ...p, autoClimb: 'Yes' }))} />
             <OptionButton label="Fail" selected={form.autoClimb === 'Fail'} onPress={() => setForm((p: any) => ({ ...p, autoClimb: 'Fail' }))} />
           </View>
+
+          <Text style={styles.label}>Auto Notes</Text>
+          <TextInput
+            style={styles.notesInput}
+            multiline
+            placeholder="Autonomous strategies, failures, path..."
+            placeholderTextColor="#888"
+            value={form.autoNotes}
+            onChangeText={(t) => setForm((p: any) => ({ ...p, autoNotes: t }))}
+            maxLength={400}
+          />
         </View>
 
         {/* --- Teleop Phase --- */}
@@ -556,6 +551,17 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
               />
             </View>
           )}
+
+          <Text style={styles.label}>Teleop Notes</Text>
+          <TextInput
+            style={styles.notesInput}
+            multiline
+            placeholder="Cycle times, defense played/received..."
+            placeholderTextColor="#888"
+            value={form.teleNotes}
+            onChangeText={(t) => setForm((p: any) => ({ ...p, teleNotes: t }))}
+            maxLength={400}
+          />
         </View>
 
         {/* --- Endgame Phase --- */}
@@ -583,12 +589,12 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Post Match</Text>
           <CounterRow label="Fouls" value={form.fouls} onChange={(v: number) => setForm((p: any) => ({ ...p, fouls: Math.max(0, p.fouls + v) }))} />
-          <Text style={styles.label}>Qualitative Notes</Text>
+          <Text style={styles.label}>General Qualitative Notes</Text>
           <Text style={styles.tinyTextLight}>Keep it short (max 400 chars) for the QR code</Text>
           <TextInput
             style={styles.notesInput}
             multiline
-            placeholder="Issues, Strategy, etc..."
+            placeholder="Overall summary, issues, strategy..."
             placeholderTextColor="#888"
             value={form.notes}
             onChangeText={(t) => setForm((p: any) => ({ ...p, notes: t }))}
@@ -606,7 +612,6 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
 
 // Main App Container
 export default function App() {
-  // Top level navigation state
   const [currentView, setCurrentView] = useState<ViewState>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -619,36 +624,30 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // Settings / Master Seat Selection
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [seatKeyInput, setSeatKeyInput] = useState('');
   const [isSeatUnlocked, setIsSeatUnlocked] = useState(false);
-  const [masterSeatKey, setMasterSeatKey] = useState('SC-TEAM-SEAT'); // default key format
+  const [masterSeatKey, setMasterSeatKey] = useState('SC-TEAM-SEAT');
   const [newMasterKeyInput, setNewMasterKeyInput] = useState('');
   const [textCompression, setTextCompression] = useState('Default');
-  const [ballIncrement, setBallIncrement] = useState(5); // Configure ball increment for faster scoring
+  const [ballIncrement, setBallIncrement] = useState(5);
 
-  // User shift preferences
   const [station, setStation] = useState<Station | ''>('');
   const [matchesScouted, setMatchesScouted] = useState(0);
 
-  // Local storage queue for offline capability
   const [matchQueue, setMatchQueue] = useState<HistoryItem[]>([]);
   const [historyQueue, setHistoryQueue] = useState<HistoryItem[]>([]);
   const [showQR, setShowQR] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   
-  // Logout verification
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [logoutInput, setLogoutInput] = useState('');
   const [logoutKeyInput, setLogoutKeyInput] = useState('');
 
-  // Match Schedule State
   const [schedule, setSchedule] = useState<any>(DEFAULT_SCHEDULE);
   const [tbaEventKey, setTbaEventKey] = useState('');
   const [isFetchingTba, setIsFetchingTba] = useState(false);
 
-  // API Configuration
   const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
   const [apiUrlInput, setApiUrlInput] = useState('');
 
@@ -664,7 +663,6 @@ export default function App() {
     AsyncStorage.getItem('@scout_station').then(s => {
       if (s) setStation(s as Station);
     });
-    // NEW: Load the saved schedule
     AsyncStorage.getItem('@match_schedule').then(s => {
       if (s) {
         try {
@@ -692,14 +690,13 @@ export default function App() {
     AsyncStorage.getItem('@api_url').then(u => {
       if (u) {
         setApiUrl(u);
-        setApiUrlInput(u); // Pre-fill input with loaded value
+        setApiUrlInput(u);
       } else {
         setApiUrlInput(DEFAULT_API_URL);
       }
     });
   }, []);
 
-  // Isolate match queue & history based on username
   useEffect(() => {
     if (username) {
       AsyncStorage.getItem(`@match_queue_${username}`).then(q => {
@@ -721,7 +718,6 @@ export default function App() {
     }
   }, [username]);
 
-  // When the match number or station changes, try to automatically figure out the team number for them
   useEffect(() => {
     if (form.matchType === 'Qual' && schedule[form.matchNumber] && station) {
       const assigned = schedule[form.matchNumber][station];
@@ -739,14 +735,12 @@ export default function App() {
     }
     setIsLoading(true);
     const targetUrl = `${apiUrl}/auth/login`;
-    console.log('[LOGIN] Attempting to reach:', targetUrl);
     try {
       const res = await fetchWithTimeout(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username, password: password })
       });
-      console.log('[LOGIN] Response status:', res.status);
       const data = await res.json();
       
       if (res.status === 201) {
@@ -761,8 +755,7 @@ export default function App() {
         Alert.alert("Error", msg);
       }
     } catch (e: any) {
-      console.log('[LOGIN] Error:', e.message);
-      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}\n\nMake sure:\n• URL starts with http://\n• Backend server is running\n• Both devices are on the same WiFi`;
+      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}`;
       setErrorMessage(msg);
       Alert.alert("Network Error", msg);
     }
@@ -787,14 +780,12 @@ export default function App() {
     
     setIsLoading(true);
     const targetUrl = `${apiUrl}/auth/sign-up`;
-    console.log('[SIGNUP] Attempting to reach:', targetUrl);
     try {
       const res = await fetchWithTimeout(targetUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, firstName, lastName, teamPassword })
       });
-      console.log('[SIGNUP] Response status:', res.status);
       const data = await res.json();
       
       if (res.status === 201) {
@@ -809,8 +800,7 @@ export default function App() {
         Alert.alert("Error", msg);
       }
     } catch (e: any) {
-      console.log('[SIGNUP] Error:', e.message);
-      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}\n\nMake sure:\n• URL starts with http://\n• Backend server is running\n• Both devices are on the same WiFi`;
+      const msg = `Could not reach backend.\n\nURL: ${targetUrl}\nError: ${e.message}`;
       setErrorMessage(msg);
       Alert.alert("Network Error", msg);
     }
@@ -844,29 +834,14 @@ export default function App() {
       return;
     }
 
-    // Because the old backend doesn't support our shiny new UI fields,
-    // we bundle the new metrics into the generic notes string so we don't lose the data.
-    let extraData = `[Start:${form.startPos}] [Pass:${form.autoPassVol}] [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] [Bump:${form.bumpCross}] [Trench:${form.trenchCross}] [Time:${form.climbTime || "0"}s] [Dead:${form.incapacitated ? 'DIE' : 'OK'}]`;
-    let parsedNotes = form.notes.replace(/\|/g, ''); // Make sure to strip any accidental pipe characters
-    
-    // If incapacitated but no time entered, assume full match (150s)
     const effectiveDeadTime = form.incapacitated ? (form.deadTime || "150") : "0";
+    
+    let extraData = `[Start:${form.startPos}] [Pass:${form.autoPassVol}] [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] [Bump:${form.bumpCross}] [Trench:${form.trenchCross}] [Time:${form.climbTime || "0"}s] [Dead:${form.incapacitated ? 'DIE' : 'OK'}]`;
+    let parsedNotes = form.notes.replace(/\|/g, ''); 
 
-    if (textCompression === 'Extreme') {
-      extraData = `${form.startPos.substring(0,1)}${form.autoPassVol.substring(0,1)}${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0}${form.autoWinner.substring(0,1)}${form.teleFerry}${form.bumpCross?1:0}${form.trenchCross?1:0}${form.incapacitated?1:0}${effectiveDeadTime}${form.climbTime}`;
-      parsedNotes = parsedNotes.replace(/\s+/g, ' '); // Shrink double spaces
-    } else if (textCompression === 'High') {
-      extraData = `S:${form.startPos.substring(0,1)} P:${form.autoPassVol.substring(0,1)} C:${form.autoCollect.outpost?1:0}${form.autoCollect.depot?1:0}${form.autoCollect.neutral?1:0} W:${form.autoWinner.substring(0,1)} F:${form.teleFerry} B:${form.bumpCross?1:0} T:${form.trenchCross?1:0} X:${form.incapacitated?1:0} dT:${effectiveDeadTime} t:${form.climbTime}`;
-    } else {
-      // Default
-      extraData = `
-        [Start:${form.startPos}] [Pass:${form.autoPassVol}] [Collect:${JSON.stringify(form.autoCollect)}]
-        [AutoWin:${form.autoWinner}] [Ferry:${form.teleFerry}] 
-        [Bump:${form.bumpCross}] [Trench:${form.trenchCross}]
-        [Dead:${form.incapacitated}] [DeadTime:${effectiveDeadTime}] [Time:${form.climbTime}]
-      `.replace(/\s+/g, ' ').trim();
-    }
-
+    // Prevent any delimiters breaking the payload
+    const safeAutoNotes = form.autoNotes.replace(/\|/g, '');
+    const safeTeleNotes = form.teleNotes.replace(/\|/g, '');
     const fullNotes = `${extraData} | ${parsedNotes}`;
 
     // Assemble the QR string EXACTLY matching the indices expected by scanner.html
@@ -879,22 +854,24 @@ export default function App() {
       form.autoMake,                                             // 5
       form.autoMiss,                                             // 6
       form.autoClimb,                                            // 7
-      form.autoPassVol,                                          // 8  (New)
-      form.autoWinner,                                           // 9  (New)
+      form.autoPassVol,                                          // 8  
+      form.autoWinner,                                           // 9  
       form.teleMake,                                             // 10
-      form.teleFerry,                                            // 11 (New)
-      form.bumpCross,                                            // 12 (New)
-      form.trenchCross,                                          // 13 (New)
+      form.teleFerry,                                            // 11 
+      form.bumpCross,                                            // 12 
+      form.trenchCross,                                          // 13 
       form.endgameAction,                                        // 14
-      form.climbTime || "0",                                     // 15 (New)
-      form.incapacitated ? 'DIE' : 'OK',                         // 16 (New)
-      fullNotes                                                  // 17 (Notes)
+      form.climbTime || "0",                                     // 15 
+      form.incapacitated ? 'DIE' : 'OK',                         // 16 
+      fullNotes,                                                 // 17 (Notes)
+      safeAutoNotes,                                             // 18 (Auto Notes specifically)
+      safeTeleNotes                                              // 19 (Teleop Notes specifically)
     ].join('|');
 
-    // Attempt to submit to backend real-time
+    // Attempt to submit to backend real-time matching the required schema strictly
     const reportPayload = {
       createdAt: new Date().toISOString(),
-      eventCode: form.eventCode.substring(0, 5).padEnd(5, 'A'), // ensure 5 chars
+      eventCode: form.eventCode.substring(0, 5).padEnd(5, 'A'),
       matchType: form.matchType === 'Play' ? 'PLAYOFF' : 'QUALIFICATION',
       matchNumber: parseInt(form.matchNumber || "1", 10),
       teamNumber: parseInt(form.teamNumber || "1", 10),
@@ -906,7 +883,7 @@ export default function App() {
       underTrench: form.trenchCross,
       startingPosition: form.startPos.toUpperCase(),
       auto: {
-        notes: '',
+        notes: safeAutoNotes.substring(0, 400),
         hubScores: form.autoMake,
         hubMisses: form.autoMiss,
         climb: form.autoClimb === 'Yes' ? 'LEVEL1' : (form.autoClimb === 'Fail' ? 'FAILED' : 'NONE'),
@@ -917,7 +894,7 @@ export default function App() {
         disruptNz: false
       },
       teleop: {
-        notes: '',
+        notes: safeTeleNotes.substring(0, 400),
         hubScores: form.teleMake,
         hubMisses: form.teleMiss,
         level: 0,
@@ -976,6 +953,18 @@ export default function App() {
     // Automatically increment the match number for the next round
     const nextMatch = (parseInt(form.matchNumber, 10) + 1).toString();
     
+    // Check if the scouter is building up too many local un-scanned codes
+    if (newQueue.length >= 3) {
+      Alert.alert(
+        "Scan Required!", 
+        `You have ${newQueue.length} unsynced matches waiting on your device! Please hold up your tablet and ask the lead scouter to scan your QR code.`,
+        [
+          { text: "Scan Now", onPress: () => setShowQR(true) },
+          { text: "Later", style: "cancel" }
+        ]
+      );
+    }
+
     // Wipe out the old data, but keep the meta data (like the new match number)
     setForm({
       ...INITIAL_MATCH_DATA,
@@ -1000,7 +989,6 @@ export default function App() {
 
     setIsFetchingTba(true);
     try {
-      // Save keys to persist them so user doesn't have to re-type
       await AsyncStorage.setItem('@tba_event_key', tbaEventKey);
 
       const res = await fetch(`https://www.thebluealliance.com/api/v3/event/${tbaEventKey}/matches/simple`, {
@@ -1016,11 +1004,9 @@ export default function App() {
       const data = await res.json();
       const newSchedule: any = {};
 
-      // Parse matches. We only care about Qualification matches ('qm')
       data.forEach((match: any) => {
         if (match.comp_level === 'qm') {
           const matchNum = match.match_number;
-          // Extract team numbers cleanly (e.g. from 'frc123' to '123')
           const redTeams = match.alliances.red.team_keys.map((k: string) => k.replace('frc', ''));
           const blueTeams = match.alliances.blue.team_keys.map((k: string) => k.replace('frc', ''));
           
@@ -1120,7 +1106,6 @@ export default function App() {
                 style={{ backgroundColor: '#ff9500', padding: 10, borderRadius: 8, alignItems: 'center' }}
                 onPress={async () => {
                   let cleaned = apiUrlInput.trim();
-                  // Remove trailing slash if present
                   if (cleaned.endsWith('/')) cleaned = cleaned.slice(0, -1);
                   setApiUrl(cleaned);
                   setApiUrlInput(cleaned);
@@ -1170,7 +1155,6 @@ export default function App() {
                 Adjust how many balls/fuel increment per button press
               </Text>
 
-              {/* Calculate current average score to show suggestion */}
               {(() => {
                 const avgScore = form.teamNumber ? calculateAverageTeamScore(historyQueue, form.teamNumber) : 0;
                 const suggested = avgScore > 0 ? suggestBallIncrement(avgScore) : 5;
