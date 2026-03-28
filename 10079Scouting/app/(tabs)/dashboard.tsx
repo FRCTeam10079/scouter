@@ -1,24 +1,19 @@
-import { Image } from 'expo-image';
-import { useState } from 'react';
-import {
-  FlatList,
-  Pressable,
-  StyleSheet,
-  View,
-} from 'react-native';
+import { Image } from "expo-image";
+import { useState } from "react";
+import { FlatList, Pressable, StyleSheet, View } from "react-native";
 
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView } from "react-native-safe-area-context";
 
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors } from '@/constants/theme';
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { IconSymbol } from "@/components/ui/icon-symbol";
+import { Colors } from "@/constants/theme";
 
 // Sample team data
 const initialTeams = [
-  { id: '1', teamNumber: '2394' },
-  { id: '2', teamNumber: '23494' },
-  { id: '3', teamNumber: '10079' },
+  { id: "1", teamNumber: "2394" },
+  { id: "2", teamNumber: "23494" },
+  { id: "3", teamNumber: "10079" },
 ];
 
 type Team = {
@@ -43,7 +38,7 @@ export default function DashboardScreen() {
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <Image
-              source={require('@/assets/images/ArrowdynamicsLogo.png')}
+              source={require("@/assets/images/ArrowdynamicsLogo.png")}
               style={styles.logo}
               contentFit="contain"
             />
@@ -83,23 +78,23 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
   },
   container: {
     flex: 1,
     paddingHorizontal: 16,
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: "#eee",
   },
   headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 12,
   },
   logo: {
@@ -108,11 +103,11 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
+    fontWeight: "bold",
   },
   headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 16,
   },
   addButton: {
@@ -122,10 +117,10 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#ccc',
+    backgroundColor: "#ccc",
   },
   sortContainer: {
-    alignItems: 'flex-end',
+    alignItems: "flex-end",
     paddingVertical: 12,
   },
   sortButton: {
@@ -134,7 +129,7 @@ const styles = StyleSheet.create({
   },
   sortText: {
     fontSize: 14,
-    color: '#333',
+    color: "#333",
   },
   teamList: {
     flex: 1,
@@ -143,8 +138,8 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
   teamItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingVertical: 16,
     paddingHorizontal: 12,
     gap: 16,
@@ -153,15 +148,15 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 4,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: "#e0e0e0",
   },
   teamNumber: {
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   separator: {
     height: 1,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: "#e0e0e0",
     marginHorizontal: 12,
   },
 });
