@@ -75,6 +75,25 @@ tr:hover{background:rgba(255,255,255,.05)}
 
   <!-- PRINT -->
   <div id="print-section" class="hidden" style="text-align:left">
+    <div style="background:#252525;padding:20px;border-radius:8px;border:1px solid #444;margin-bottom:20px;">
+      <h4 style="margin-top:0">Event Data Management</h4>
+      <p style="font-size:12px;color:#aaa;margin-top:5px;margin-bottom:12px">Group saved matches into events to filter rankings and printouts. New scans automatically join the Active Event.</p>
+      
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+        <label style="font-size:13px;font-weight:bold;width:120px">Active Event:</label>
+        <input id="active-event-input" type="text" placeholder="e.g. SVR" onchange="updateActiveEvent()" style="margin-bottom:0;flex:1">
+        <button onclick="tagAllVisibleWithActiveEvent()" style="width:auto;margin:0;background:#0a84ff;padding:12px 15px">Tag All Pulled Matches</button>
+      </div>
+      
+      <div style="font-size:13px;margin-top:15px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+        <b>Filter Statistics By Events (Empty = Show All):</b>
+        <button onclick="createNewEventBucket()" style="width:auto;margin:0;padding:6px 12px;font-size:11px;background:#444">+ Create Event Bucket</button>
+      </div>
+      <div id="event-filters-container" style="display:flex;gap:10px;flex-wrap:wrap;font-size:13px">
+        <!-- checkboxes generated here -->
+      </div>
+    </div>
+
     <h3 class="section-title">Print Stats Center</h3>
     <p style="color:#888;margin-bottom:20px">Generate printer-friendly reports for drive coaches.</p>
     <div class="grid">
@@ -158,6 +177,16 @@ tr:hover{background:rgba(255,255,255,.05)}
   </div>
 </div>
 
+  <!-- Notification Toast -->
+  <div id="print-notification-toast" class="hidden" style="position:fixed;bottom:20px;right:20px;background:#333;border:2px solid #0a84ff;padding:15px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);z-index:9999;width:300px">
+    <div style="font-weight:bold;margin-bottom:10px;font-size:16px;">Reminder: Upcoming Match</div>
+    <div style="margin-bottom:15px;color:#ddd;font-size:14px;" id="toast-message">Print out the single match report for Match X.</div>
+    <div style="display:flex;gap:10px;">
+      <button style="margin:0;padding:8px;background:#22c55e;" onclick="document.getElementById('print-notification-toast').classList.add('hidden'); printMatchReport(window.upcomingPrintMatch);">Print Report</button>
+      <button style="margin:0;padding:8px;background:#444;" onclick="document.getElementById('print-notification-toast').classList.add('hidden')">Dismiss</button>
+    </div>
+  </div>
+
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 var API_URL = "https://6k0bvq8z-8000.usw2.devtunnels.ms";
@@ -208,6 +237,14 @@ var visualTargetZoom = 1;
 var visualCurrentZoom = 1;
 var advancedScanEnabled = true;
 
+var highestScannedMatch = parseInt(localStorage.getItem("@scanner_highest_match") || "0", 10);
+var notifiedMatches = JSON.parse(localStorage.getItem("@scanner_notified_matches") || "{}");
+
+var eventTags = JSON.parse(localStorage.getItem("@scanner_event_tags") || "{}");
+var activeEventName = localStorage.getItem("@scanner_active_event") || "Default Event";
+var selectedFilterEvents = JSON.parse(localStorage.getItem("@scanner_filter_events") || '[]');
+var knownEvents = JSON.parse(localStorage.getItem("@scanner_known_events") || '["Default Event"]');
+
 // ─── DOM REFS ────────────────────────────────────────────────────────────────
 function $(id){ return document.getElementById(id); }
 var loginSec   = $("login-section");
@@ -246,6 +283,34 @@ function log(msg, type){
 function clearLogs(){
   logsBox.innerHTML = "";
   log("Logs cleared.");
+}
+
+window.upcomingPrintMatch = null;
+
+function showPrintNotification(matchNum) {
+  window.upcomingPrintMatch = matchNum;
+  var toast = $("print-notification-toast");
+  var msg = $("toast-message");
+  if(toast && msg) {
+    msg.innerHTML = "Print out the single match report for <b>Match " + matchNum + "</b>.";
+    toast.classList.remove("hidden");
+    log("Notifying to print upcoming Match " + matchNum, "info");
+  }
+}
+
+function checkUpcomingPrint(matchNum) {
+  if (matchNum > highestScannedMatch) {
+    highestScannedMatch = matchNum;
+    localStorage.setItem("@scanner_highest_match", highestScannedMatch);
+  }
+
+  var upcoming = highestScannedMatch + 4;
+  
+  if (!notifiedMatches[upcoming]) {
+    notifiedMatches[upcoming] = true;
+    localStorage.setItem("@scanner_notified_matches", JSON.stringify(notifiedMatches));
+    showPrintNotification(upcoming);
+  }
 }
 
 function loadPendingReports(){
@@ -1167,15 +1232,18 @@ function processSingleMatch(str){
   .then(function(res){
     if(res.status === 201){
       log("Saved Match " + p[1] + " (Team " + p[2] + ")", "success");
+      checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
     }
     return res.json().then(function(err){
       if(err.message && err.message.indexOf("Unique") !== -1){
         log("Match " + p[1] + " already saved. Skipped.", "info");
+        checkUpcomingPrint(parseInt(p[1], 10));
         return {match:p[1], team:p[2]};
       }
       var queued = enqueuePendingReport(payload);
       if(queued){ log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info"); }
+      checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
     });
   })
@@ -1183,8 +1251,144 @@ function processSingleMatch(str){
     var queued = enqueuePendingReport(payload);
     if(queued){ log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info"); } 
     else { log("Already queued offline: Match " + p[1] + " (Team " + p[2] + ").", "info"); }
+    checkUpcomingPrint(parseInt(p[1], 10));
     return {match:p[1], team:p[2]};
   });
+}
+
+// ─── EVENT MANAGEMENT ────────────────────────────────────────────────────────
+function renderEventUI() {
+  if($("active-event-input")) $("active-event-input").value = activeEventName;
+  var container = $("event-filters-container");
+  if(!container) return;
+  
+  var uniqueEvents = {};
+  knownEvents.forEach(function(ev){ uniqueEvents[ev] = true; });
+  uniqueEvents[activeEventName] = true;
+  Object.keys(eventTags).forEach(function(k){ uniqueEvents[eventTags[k]] = true; });
+  
+  // Keep known events strictly in sync
+  knownEvents = Object.keys(uniqueEvents);
+  localStorage.setItem("@scanner_known_events", JSON.stringify(knownEvents));
+  
+  var html = "";
+  knownEvents.sort().forEach(function(ev){
+    if(!ev) return;
+    var checked = selectedFilterEvents.indexOf(ev) !== -1 ? "checked" : "";
+    html += "<label style='background:#333;padding:8px 12px;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:6px;border:1px solid "+(checked?"#0a84ff":"#444")+"'><input type='checkbox' value='"+ev+"' onchange='toggleEventFilter(this)' "+checked+"> <b>" + ev + "</b></label>";
+  });
+  if(selectedFilterEvents.length === 0) {
+    html += "<div style='color:#ff9500;margin-top:4px;font-style:italic'>No events selected. System is currently analyzing ALL events.</div>";
+  }
+  container.innerHTML = html;
+}
+
+function updateActiveEvent() {
+  var val = ($("active-event-input").value || "").trim();
+  if(val && val !== activeEventName) {
+    activeEventName = val;
+    localStorage.setItem("@scanner_active_event", activeEventName);
+    
+    var needsSave = false;
+    // Auto-migrate any placeholder "Default Event" tags safely
+    Object.keys(eventTags).forEach(function(k){
+      if(eventTags[k] === "Default Event") {
+        eventTags[k] = activeEventName;
+        needsSave = true;
+      }
+    });
+
+    var filterIdx = selectedFilterEvents.indexOf("Default Event");
+    if(filterIdx !== -1) {
+      selectedFilterEvents[filterIdx] = activeEventName;
+      localStorage.setItem("@scanner_filter_events", JSON.stringify(selectedFilterEvents));
+    }
+
+    if(needsSave){
+      localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    }
+
+    renderEventUI();
+    log("Active event updated to: " + activeEventName, "info");
+    fetchData(); // Instantly refresh the Recent Matches table!
+  }
+}
+
+function createNewEventBucket() {
+  var eName = prompt("Enter a name for the new Event Bucket:");
+  if (!eName || !eName.trim()) return;
+  eName = eName.trim();
+  if (knownEvents.indexOf(eName) === -1) {
+    knownEvents.push(eName);
+    localStorage.setItem("@scanner_known_events", JSON.stringify(knownEvents));
+    renderEventUI();
+  } else {
+    alert("Event bucket already exists: " + eName);
+  }
+}
+
+function toggleEventFilter(cb) {
+  var val = cb.value;
+  if(cb.checked) {
+    if(selectedFilterEvents.indexOf(val) === -1) selectedFilterEvents.push(val);
+  } else {
+    var idx = selectedFilterEvents.indexOf(val);
+    if(idx !== -1) selectedFilterEvents.splice(idx, 1);
+  }
+  localStorage.setItem("@scanner_filter_events", JSON.stringify(selectedFilterEvents));
+  renderEventUI();
+}
+
+function tagAllVisibleWithActiveEvent() {
+  var w = prompt("Type 'TAG' to assign ALL currently downloaded matches in the database to the Active Event ("+activeEventName+").");
+  if (w !== 'TAG') return log("Tagging cancelled.", "error");
+
+  if(!AUTH_TOKEN) return log("Must connect first.", "error");
+
+  fetchTimeout(API_URL + "/reports?take=2000&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
+  .then(function(r){ return r.json(); })
+  .then(function(data){
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    var visibleData = (data || []).filter(function(d){ return (d.id || Infinity) > hideId; });
+    var count = 0;
+    visibleData.forEach(function(r){
+      if(r.id && eventTags[r.id] !== activeEventName){
+        eventTags[r.id] = activeEventName;
+        count++;
+      }
+    });
+    localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    renderEventUI();
+    log("Successfully grouped " + count + " available matches into active event: " + activeEventName, "success");
+    fetchData(); // refresh table
+  })
+  .catch(function(e){ log("Failed to fetch matches for tagging: " + e.message, "error"); });
+}
+
+function applyLocalFilters(all) {
+  if (!all) return [];
+  var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+  all = all.filter(function(d) { return (d.id || Infinity) > hideId; });
+  
+  var needsSave = false;
+  all.forEach(function(r) {
+    if (r.id && !eventTags[r.id]) {
+      eventTags[r.id] = activeEventName;
+      needsSave = true;
+    }
+  });
+  if (needsSave) {
+    localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    renderEventUI();
+  }
+
+  if (selectedFilterEvents.length > 0) {
+    all = all.filter(function(r) {
+      if (!r.id) return true;
+      return selectedFilterEvents.indexOf(eventTags[r.id]) !== -1;
+    });
+  }
+  return all;
 }
 
 // ─── DATA TABLE ──────────────────────────────────────────────────────────────
@@ -1196,9 +1400,8 @@ function fetchData(){
   fetchTimeout(API_URL + "/reports?take=40&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
   .then(function(r){ return r.json(); })
   .then(function(data){
-    window.lastFetchedMaxId = data.reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
-    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-    var visibleData = data.filter(function(d){ return (d.id || Infinity) > hideId; });
+    window.lastFetchedMaxId = (data || []).reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
+    var visibleData = applyLocalFilters(data);
 
     visibleData.sort(function(a,b){ return b.id - a.id; });
     tableBody.innerHTML = visibleData.map(function(r){
@@ -1207,7 +1410,8 @@ function fetchData(){
       if (!r.user && r.username) sc = r.username;
       
       var mn = r.matchNumber || r.id;
-      return "<tr><td style='font-weight:bold;color:#0a84ff;cursor:pointer;text-decoration:underline' onclick='printMatchReport("+Number(mn)+")' title='Print all 6 teams for this match'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>Saved</td></tr>";
+      var evTag = eventTags[r.id] || "Unknown";
+      return "<tr><td style='font-weight:bold;color:#0a84ff;cursor:pointer;text-decoration:underline' onclick='printMatchReport("+Number(mn)+")' title='Print all 6 teams for this match'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>["+evTag+"] Saved</td></tr>";
     }).join("") || "<tr class='empty-row'><td colspan='4'>No matches yet.</td></tr>";
   })
   .catch(function(e){ log("Table sync error: " + e.message, "error"); });
@@ -1409,8 +1613,7 @@ function printTeamReport(){
   fetchTimeout(API_URL + "/reports?take=200&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
   .then(function(r2){ return r2.json(); })
   .then(function(all){
-    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-    all = all.filter(function(d){ return (d.id || Infinity) > hideId; });
+    all = applyLocalFilters(all);
     
     console.log("[DEBUG] Fetch all matching reports returned records:", all.length);
     if(all.length > 0) { console.log("[DEBUG] Sample first report:", all[0]); }
@@ -1596,8 +1799,7 @@ function fetchAllFullReports(){
   return fetchTimeout(API_URL + "/reports?take=2000&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
   .then(function(r){ return r.json(); })
   .then(function(all){
-    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-    all = (all || []).filter(function(d){ return (d.id || Infinity) > hideId; });
+    all = applyLocalFilters(all);
     var fullMatchPromises = all.map(function(m){
       return fetchTimeout(API_URL + "/report/" + m.id, {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
         .then(function(res){ return res.json(); })
@@ -1706,14 +1908,12 @@ function teamBoxHtml(slot, teamNum, teamStats, matchReports, conflictLines){
     return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fafafa'>" +
       "<div style='font-weight:bold'>" + slot + "</div><div style='color:#888'>No team mapped</div></div>";
   }
-  var s = teamStats || {
-    avgAutoHub: 0, maxAutoHub: 0,
-    avgTeleHub: 0, maxTeleHub: 0,
-    bestMatch: { matchNumber: "?", totalScore: 0 },
-    climbAttempts: 0, climbSuccesses: 0,
-    dominantStart: "Unknown",
-    matchesPlayed: 0
-  };
+  if(!teamStats || teamStats.matchesPlayed === 0){
+    return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fafafa'>" +
+      "<div style='font-weight:bold'>" + slot + " - Team " + teamNum + "</div>" +
+      "<div style='color:#888;margin-top:6px;font-size:13px'>No scouting info for this team yet.</div></div>";
+  }
+  var s = teamStats;
 
   var currentMatchAuto = 0;
   var currentMatchTele = 0;
@@ -1950,8 +2150,7 @@ function printRankings(){
   fetchTimeout(API_URL + "/reports?take=2000&skip=0", {headers:{Authorization:"Bearer "+AUTH_TOKEN}})
   .then(function(r){ return r.json(); })
   .then(function(all){
-    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-    all = all.filter(function(d){ return (d.id || Infinity) > hideId; });
+    all = applyLocalFilters(all);
     
     log("Processing " + all.length + " match records to build rankings...", "info");
 
@@ -2076,6 +2275,7 @@ window.addEventListener("online", function(){
 window.addEventListener("resize", normalizeCameraViewport);
 window.addEventListener("orientationchange", normalizeCameraViewport);
 normalizeCameraViewport();
+renderEventUI(); // Boot up event UI filter list
 </script>
 </body>
 </html>
