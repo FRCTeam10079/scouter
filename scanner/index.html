@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lead Scouter Hub - 2026</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="header-row">
+        <h1>Lead Scouter</h1>
+        <div
+          id="nav-buttons"
+          class="hidden"
+          style="display: flex; gap: 10px; align-items: center"
+        >
+          <button
+            onclick="switchTab('scan')"
+            id="nav-scan-btn"
+            class="secondary"
+            style="width: auto; padding: 5px 15px; font-size: 12px"
+          >
+            Scanner
+          </button>
+          <button
+            onclick="switchTab('print')"
+            id="nav-print-btn"
+            class="secondary"
+            style="width: auto; padding: 5px 15px; font-size: 12px"
+          >
+            Print Reports
+          </button>
+          <div id="connection-status" class="status-badge">DISCONNECTED</div>
+        </div>
+      </div>
+
+      <!-- LOGIN -->
+      <div id="login-section">
+        <input id="username" type="text" placeholder="Username" value="" />
+        <input id="password" type="password" placeholder="Password" value="" />
+        <button id="login-btn" onclick="login()">Connect to Backend</button>
+        <p id="lib-msg" style="font-size: 12px; color: #666; margin-top: 8px">
+          Ready.
+        </p>
+      </div>
+
+      <!-- PRINT -->
+      <div id="print-section" class="hidden" style="text-align: left">
+        <h3 class="section-title">Print Stats Center</h3>
+        <p style="color: #888; margin-bottom: 20px">
+          Generate printer-friendly reports for drive coaches.
+        </p>
+        <div class="grid">
+          <button onclick="printAllPitReports()" style="background: #8a2be2">
+            Print Scanned Pit Reports
+          </button>
+          <div style="background: #252525; padding: 20px; border-radius: 8px">
+            <h4>Single Team Report</h4>
+            <input
+              id="print-team-input"
+              type="number"
+              placeholder="Enter Team # (e.g. 254)"
+              style="font-size: 18px; text-align: center"
+            />
+            <p style="color: #aaa; font-size: 12px; margin: 10px 0 12px">
+              Single-page summary (no per-match breakdown).
+            </p>
+            <button onclick="printTeamReport()">Generate Team Report</button>
+          </div>
+          <div style="background: #252525; padding: 20px; border-radius: 8px">
+            <h4>Event Rankings</h4>
+            <p style="font-size: 12px; color: #aaa">
+              Top teams by custom metric.
+            </p>
+            <div style="display: flex; gap: 10px; margin-bottom: 10px">
+              <input
+                id="rankings-limit-input"
+                type="number"
+                placeholder="Count"
+                value="10"
+                style="width: 80px; text-align: center; margin-bottom: 0"
+              />
+              <select
+                id="rankings-metric-input"
+                style="
+                  flex: 1;
+                  padding: 12px;
+                  background: #2c2c2c;
+                  border: 1px solid #444;
+                  color: white;
+                  border-radius: 6px;
+                  font-size: 14px;
+                "
+              >
+                <option value="avgScore">Avg Total Score</option>
+                <option value="avgAuto">Avg Auto Pts</option>
+                <option value="avgTele">Avg Tele Hubs</option>
+                <option value="avgEndPts">Avg Endgame Pts</option>
+                <option value="avgFerry">Avg Ferry Volume</option>
+                <option value="avgAutoMiss">Avg Auto Misses</option>
+                <option value="avgIncap">Avg Incapacitated Time</option>
+              </select>
+            </div>
+            <button
+              onclick="printRankings()"
+              style="background: #22c55e; font-size: 14px; margin-top: 0"
+            >
+              Print Top List
+            </button>
+          </div>
+          <div style="background: #252525; padding: 20px; border-radius: 8px">
+            <h4>Single Match (All 6 Teams)</h4>
+            <p style="font-size: 12px; color: #aaa">
+              One-page match report grouped by Red/Blue with positions and
+              conflicts. Uses scouting station info first.
+            </p>
+            <input
+              id="print-match-input"
+              type="number"
+              placeholder="Enter Match # (e.g. 18)"
+              style="font-size: 18px; text-align: center"
+            />
+            <input
+              id="tba-event-key-input"
+              type="text"
+              placeholder="Optional TBA Event Key (fallback only)"
+            />
+            <input
+              id="tba-api-key-input"
+              type="password"
+              placeholder="Optional TBA API Key (runtime only)"
+            />
+            <button
+              onclick="printMatchReportFromInput()"
+              style="background: #ff9500"
+            >
+              Generate Match Report
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCAN -->
+      <div id="scan-section" class="hidden">
+        <div class="grid">
+          <div>
+            <h3>Live Scanner</h3>
+            <div class="cam-wrapper">
+              <div id="reader"></div>
+              <div id="cam-placeholder">Camera off</div>
+              <div id="scan-overlay" class="hidden">
+                <div class="check-icon">&#x2705;</div>
+                <div class="scan-msg">Scan Successful!</div>
+                <div class="scan-detail" id="scan-info">Match - Team</div>
+                <button class="success-btn" onclick="resetScanner()">
+                  Scan Next Tablet
+                </button>
+              </div>
+              <div id="scan-hint" class="scan-hint hidden">
+                Possible QR seen. Move closer and hold steady.
+              </div>
+            </div>
+            <div class="btn-group">
+              <button id="cam-btn" onclick="toggleCamera()">
+                Start Camera
+              </button>
+              <button
+                class="secondary"
+                onclick="document.getElementById('file-input').click()"
+              >
+                Upload Image
+              </button>
+            </div>
+            <label
+              style="
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 6px;
+                font-size: 12px;
+                color: #bbb;
+              "
+            >
+              <input
+                id="advanced-scan-toggle"
+                type="checkbox"
+                checked
+                style="width: auto; margin: 0"
+              />
+              Advanced scan assist (hint + smart sweep + auto zoom)
+            </label>
+            <input
+              id="file-input"
+              type="file"
+              accept="image/*"
+              class="hidden"
+            />
+          </div>
+          <div>
+            <h3>System Logs</h3>
+            <div id="logs" class="status-log">
+              System ready. Waiting for input.
+            </div>
+            <div class="btn-group">
+              <button class="secondary" onclick="fetchData()">
+                Refresh Table
+              </button>
+              <button class="secondary" onclick="clearLogs()">
+                Clear Logs
+              </button>
+              <button
+                class="secondary"
+                style="color: #ff453a; border: 1px solid #ff453a"
+                onclick="hideAllMatches()"
+              >
+                Purge View
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="section-title">Recent Matches</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Match</th>
+              <th>Team</th>
+              <th>Scouter</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+            <tr class="empty-row">
+              <td colspan="4">Waiting for data...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>

@@ -1,0 +1,261 @@
+body {
+  font-family: "Segoe UI", monospace;
+  background: #121212;
+  color: #fff;
+  padding: 20px;
+  text-align: center;
+  margin: 0;
+}
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  background: #1e1e1e;
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid #333;
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 20px;
+  text-align: left;
+}
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.btn-group {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.hidden {
+  display: none !important;
+}
+h1 {
+  margin: 0;
+}
+h3 {
+  margin-top: 0;
+}
+.section-title {
+  margin-top: 30px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 10px;
+  text-align: left;
+}
+.status-badge {
+  font-size: 12px;
+  font-weight: bold;
+  color: #666;
+  transition: color 0.3s;
+}
+.status-badge.connected {
+  color: #4cd964;
+}
+input {
+  padding: 12px;
+  width: 100%;
+  margin-bottom: 10px;
+  background: #2c2c2c;
+  border: 1px solid #444;
+  color: white;
+  border-radius: 6px;
+  box-sizing: border-box;
+  font-size: 15px;
+}
+button {
+  padding: 12px 20px;
+  background: #0a84ff;
+  color: white;
+  border: none;
+  font-weight: bold;
+  cursor: pointer;
+  margin: 5px 0;
+  width: 100%;
+  border-radius: 6px;
+  transition: 0.2s;
+  font-size: 14px;
+}
+button:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+button.secondary {
+  background: #444;
+}
+button.success-btn {
+  background: #22c55e;
+  font-size: 18px;
+  padding: 20px;
+  margin-top: 15px;
+  box-shadow: 0 4px 15px rgba(34, 197, 94, 0.4);
+}
+.status-log {
+  background: #000;
+  padding: 10px;
+  border-radius: 6px;
+  height: 350px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 11px;
+  border: 1px solid #333;
+}
+.log-success {
+  color: #4cd964;
+}
+.log-error {
+  color: #ff453a;
+  font-weight: bold;
+}
+.log-info {
+  color: #0a84ff;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 13px;
+}
+th,
+td {
+  border-bottom: 1px solid #333;
+  padding: 10px;
+  text-align: left;
+}
+th {
+  background: #252525;
+  color: #aaa;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+tr:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.empty-row td {
+  text-align: center;
+  padding: 20px;
+  color: #666;
+}
+.cam-wrapper {
+  position: relative;
+  width: 100%;
+  height: clamp(320px, 52vh, 560px);
+  min-height: 320px;
+  max-height: 560px;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border: 2px solid #444;
+  border-radius: 8px;
+  overflow: hidden;
+  display: block;
+}
+#reader {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+#reader video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  display: block;
+  transform-origin: center center;
+  transition: transform 0.16s ease-out;
+  will-change: transform;
+}
+#cam-placeholder {
+  color: #555;
+  font-size: 14px;
+  pointer-events: none;
+}
+#scan-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 10;
+}
+.scan-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  background: rgba(255, 149, 0, 0.94);
+  color: #111;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  z-index: 9;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  max-width: 92%;
+  text-align: center;
+}
+.check-icon {
+  font-size: 60px;
+  margin-bottom: 10px;
+}
+.scan-msg {
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+.scan-detail {
+  font-size: 14px;
+  color: #aaa;
+}
+@media print {
+  body {
+    background: #fff;
+    color: #111;
+    font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+    padding: 20px;
+  }
+  h1,
+  h2,
+  h3 {
+    color: #111;
+  }
+  h1 {
+    font-size: 24px;
+    margin-bottom: 4px;
+  }
+  h2 {
+    font-size: 16px;
+    margin-top: 18px;
+    border-bottom: 2px solid #ddd;
+  }
+  h3 {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  p {
+    color: #333;
+    line-height: 1.5;
+  }
+  ul {
+    color: #333;
+  }
+  div {
+    color: #333;
+  }
+  a {
+    color: #0066cc;
+  }
+}
