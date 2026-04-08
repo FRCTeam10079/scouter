@@ -9,6 +9,7 @@ const ZXING_LOCAL_WASM = "./assets/zxing/reader/zxing_reader.wasm";
 const ZXING_CDN_IIFE =
   "https://cdn.jsdelivr.net/npm/zxing-wasm@3.0.1/dist/iife/reader/index.js";
 const OFFLINE_QUEUE_KEY = "@scanner_pending_reports_v1";
+const LOCAL_RECENT_REPORTS_KEY = "@scanner_recent_reports_v1";
 const TBA_EVENT_KEY_STORAGE = "@scanner_tba_event_key_v1";
 const TBA_SCHEDULE_CACHE_PREFIX = "@scanner_tba_schedule_";
 
@@ -80,6 +81,108 @@ async function fetchTimeout(url, opts) {
   } finally {
     clearTimeout(t);
   }
+}
+
+function normalizeReportList(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.items)) return value.items;
+  if (Array.isArray(value?.results)) return value.results;
+  if (Array.isArray(value?.reports)) return value.reports;
+  return [];
+}
+
+async function fetchReportList(take, skip) {
+  const payload = { take: Number(take) || 40, skip: Number(skip) || 0 };
+
+  let res = await fetchTimeout(`${API_URL}/get-reports`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  // Some backend deployments expose GET /reports instead.
+  if (res.status === 404) {
+    res = await fetchTimeout(
+      `${API_URL}/reports?take=${payload.take}&skip=${payload.skip}`,
+      {
+        headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+      },
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(`report list failed (${res.status})`);
+  }
+
+  return normalizeReportList(await res.json());
+}
+
+function loadRecentReports() {
+  try {
+    const raw = localStorage.getItem(LOCAL_RECENT_REPORTS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+function saveRecentReports(items) {
+  try {
+    localStorage.setItem(LOCAL_RECENT_REPORTS_KEY, JSON.stringify(items));
+  } catch (_e) {
+    // Best effort cache only.
+  }
+}
+
+function upsertRecentReport(payload, statusText) {
+  const list = loadRecentReports();
+  const key = `${payload.matchNumber}|${payload.teamNumber}`;
+  const idx = list.findIndex(
+    (x) => `${x.matchNumber}|${x.teamNumber}` === key,
+  );
+  const row = {
+    id: Date.now(),
+    matchNumber: payload.matchNumber,
+    teamNumber: payload.teamNumber,
+    username: "Local",
+    statusText: statusText || "Saved",
+  };
+  if (idx >= 0) list[idx] = row;
+  else list.unshift(row);
+  saveRecentReports(list.slice(0, 120));
+}
+
+function renderTableFromLocalCache() {
+  const rows = loadRecentReports();
+  if (!rows.length) {
+    tableBody.innerHTML =
+      "<tr class='empty-row'><td colspan='4'>No local cached matches yet.</td></tr>";
+    return;
+  }
+
+  tableBody.innerHTML = rows
+    .map((r) => {
+      const mn = r.matchNumber || r.id || "?";
+      const sc = r.username || "Local";
+      const status = r.statusText || "Saved";
+      return (
+        "<tr><td style='font-weight:bold;color:#0a84ff'>Q" +
+        mn +
+        "</td><td style='font-weight:bold;font-size:1.1em'>" +
+        r.teamNumber +
+        "</td><td style='color:#aaa'>" +
+        sc +
+        "</td><td style='color:#ff9500'>[" +
+        status +
+        "]</td></tr>"
+      );
+    })
+    .join("");
 }
 
 function log(msg, type) {
@@ -1121,24 +1224,21 @@ function processSingleMatch(str) {
     eventCode: (p[0] || "2026A").substring(0, 5).padEnd(5, "A"),
     matchType: "QUALIFICATION",
     matchNumber: matchNum,
+    alliance: p[21] ? (p[21].startsWith("Blue") ? "BLUE" : "RED") : "RED",
     teamNumber: teamNum,
+    inMatch: true,
     notes: rawNotes.substring(0, 400),
-    minorFouls: 0,
+    minorFouls: parseInt(p[22], 10) || 0,
     majorFouls: 0,
     secondsIncapacitated: incapSeconds,
-    overBump: p[12] === "true" || p[12] === "1",
-    underTrench: p[13] === "true" || p[13] === "1",
-    startingPosition: (p[4] || "CENTER").toUpperCase(),
+    secondsDead: incapSeconds,
+    shootingConfidence: 3,
     auto: {
       notes: autoNotes.substring(0, 400),
       hubScores: parseInt(p[5], 10) || 0,
       hubMisses: parseInt(p[6], 10) || 0,
       climb: p[7] === "Yes" ? "LEVEL1" : p[7] === "Fail" ? "FAILED" : "NONE",
       passes: p[8] === "High" ? 3 : p[8] === "Med" ? 2 : p[8] === "Low" ? 1 : 0,
-      collectDepot: false,
-      collectNeutral: false,
-      collectOutpost: false,
-      disruptNz: false,
     },
     teleop: {
       notes: teleNotes.substring(0, 400),
@@ -1146,8 +1246,9 @@ function processSingleMatch(str) {
       hubMisses: 0,
       level: 0,
       climbFailed: false,
-      defended: false,
+      defended: p[20] === "true" || p[20] === "1",
       passes: parseInt(p[11], 10) || 0,
+      wasDefended: false,
     },
     endgame: {
       notes: "",
@@ -1174,16 +1275,23 @@ function processSingleMatch(str) {
     .then((res) => {
       if (res.status === 201) {
         log(`Saved Match ${p[1]} (Team ${p[2]})`, "success");
+        upsertRecentReport(payload, "Saved");
         return { match: p[1], team: p[2] };
       }
       return res.json().then((err) => {
         if (err.message && err.message.indexOf("Unique") !== -1) {
           log(`Match ${p[1]} already saved. Skipped.`, "info");
+          upsertRecentReport(payload, "Saved");
           return { match: p[1], team: p[2] };
         }
+        log(
+          `Backend rejected Match ${p[1]} (Team ${p[2]}): ${err.message || JSON.stringify(err)}`,
+          "error",
+        );
         const queued = enqueuePendingReport(payload);
         if (queued) {
           log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
+          upsertRecentReport(payload, "Queued");
         }
         return { match: p[1], team: p[2] };
       });
@@ -1192,6 +1300,7 @@ function processSingleMatch(str) {
       const queued = enqueuePendingReport(payload);
       if (queued) {
         log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
+        upsertRecentReport(payload, "Queued");
       } else {
         log(`Already queued offline: Match ${p[1]} (Team ${p[2]}).`, "info");
       }
@@ -1203,12 +1312,7 @@ function processSingleMatch(str) {
 function fetchData() {
   if (!AUTH_TOKEN) return;
 
-  // NOTE: The standard /reports endpoint seems to only return basic info!
-  // We may need to get full stats. For now, let's keep fetching reports but request full data if possible.
-  fetchTimeout(`${API_URL}/reports?take=40&skip=0`, {
-    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-  })
-    .then((r) => r.json())
+  fetchReportList(40, 0)
     .then((data) => {
       window.lastFetchedMaxId = data.reduce(
         (max, d) => Math.max(max, d.id || 0),
@@ -1245,6 +1349,7 @@ function fetchData() {
     })
     .catch((e) => {
       log(`Table sync error: ${e.message}`, "error");
+      renderTableFromLocalCache();
     });
 }
 
@@ -1499,10 +1604,7 @@ function printTeamReport() {
   // Try the stats endpoint first; fall back to raw reports on any non-200
   // Note: the backend `/reports` list endpoint usually only returns id, teamNumber, user.
   // We need to fetch details for these specific reports!
-  fetchTimeout(`${API_URL}/reports?take=200&skip=0`, {
-    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-  })
-    .then((r2) => r2.json())
+  fetchReportList(200, 0)
     .then((all) => {
       const hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
       all = all.filter((d) => (d.id || Infinity) > hideId);
@@ -1829,13 +1931,10 @@ async function ensureScheduleMap(eventKey, apiKey) {
 }
 
 async function fetchAllFullReports() {
-  const r = await fetchTimeout(`${API_URL}/reports?take=2000&skip=0`, {
-    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-  });
-  const all = await r.json();
+  const all = await fetchReportList(2000, 0);
   const hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-  all = (all || []).filter((d) => (d.id || Infinity) > hideId);
-  const fullMatchPromises = all.map((m) =>
+  const filtered = all.filter((d) => (d.id || Infinity) > hideId);
+  const fullMatchPromises = filtered.map((m) =>
     fetchTimeout(`${API_URL}/report/${m.id}`, {
       headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
     })
@@ -2364,11 +2463,9 @@ function printRankings() {
 
   // Since /stats/rankings is returning 404, we will fetch all reports,
   // request their full details, map them by team, compute averages, and sort them top to bottom.
-  fetchTimeout(`${API_URL}/reports?take=2000&skip=0`, {
-    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-  })
-    .then((r) => r.json())
+  fetchReportList(2000, 0)
     .then((all) => {
+      all = normalizeReportList(all);
       const hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
       all = all.filter((d) => (d.id || Infinity) > hideId);
 

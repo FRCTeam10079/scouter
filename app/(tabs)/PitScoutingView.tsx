@@ -18,6 +18,215 @@ import {
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 
+const BACKEND_INDEXERS = ["VERTICAL", "SPINDEXER", "ROLLER", "BELT", "GRAVITY"];
+const BACKEND_SHOOTERS = [
+  "SINGLE",
+  "DUAL",
+  "TRIPLE",
+  "QUAD",
+  "TURRET",
+  "DUAL_TURRET",
+  "DRUM",
+  "OTHER",
+];
+const BACKEND_DRIVETRAIN = ["SWERVE", "TANK", "MECANUM"];
+const BACKEND_STARTING_POSITIONS = [
+  "LEFT",
+  "LEFT_BUMP",
+  "LEFT_TRENCH",
+  "CENTER",
+  "RIGHT",
+  "RIGHT_BUMP",
+  "RIGHT_TRENCH",
+];
+const BACKEND_AUTO_ACTIONS = [
+  "COLLECT_DEPOT",
+  "COLLECT_OUTPOST",
+  "CROSS_LEFT_BUMP",
+  "CROSS_LEFT_TRENCH",
+  "CROSS_RIGHT_BUMP",
+  "CROSS_RIGHT_TRENCH",
+  "SHOOT",
+  "CLIMB",
+];
+
+const normalizeNumericString = (value: string, fallback = "") => {
+  const trimmed = String(value || "").trim();
+  return trimmed === "" ? fallback : trimmed;
+};
+
+const clampPositiveInt = (value: string, fallback = 1) => {
+  const parsed = parseInt(String(value || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const mapDrivetrainToBackend = (value: string) => {
+  if (value === "Tank") return BACKEND_DRIVETRAIN[1];
+  if (value === "Mecanum") return BACKEND_DRIVETRAIN[2];
+  return BACKEND_DRIVETRAIN[0];
+};
+
+const mapShooterToBackend = (value: string) => {
+  if (value === "Dual Shooter") return BACKEND_SHOOTERS[1];
+  if (value === "Triple Shooter") return BACKEND_SHOOTERS[2];
+  if (value === "Turret") return BACKEND_SHOOTERS[4];
+  if (value === "Drum") return BACKEND_SHOOTERS[6];
+  if (value === "Other") return BACKEND_SHOOTERS[7];
+  return BACKEND_SHOOTERS[0];
+};
+
+const mapStartingPositionToBackend = (value: string) => {
+  if (value === "Left") return BACKEND_STARTING_POSITIONS[0];
+  if (value === "Right") return BACKEND_STARTING_POSITIONS[4];
+  return BACKEND_STARTING_POSITIONS[3];
+};
+
+const buildAutoRoutinesPayload = (report: any) => {
+  const actions = [] as string[];
+  const autoText = String(report.autoRoutines || "").toLowerCase();
+
+  if (report.autoCollect?.depot || autoText.includes("depot")) {
+    actions.push(BACKEND_AUTO_ACTIONS[0]);
+  }
+  if (report.autoCollect?.outpost || autoText.includes("outpost")) {
+    actions.push(BACKEND_AUTO_ACTIONS[1]);
+  }
+  if (
+    report.autoCollect?.bump ||
+    autoText.includes("left bump") ||
+    autoText.includes("right bump")
+  ) {
+    actions.push(
+      autoText.includes("right")
+        ? BACKEND_AUTO_ACTIONS[4]
+        : BACKEND_AUTO_ACTIONS[2],
+    );
+  }
+  if (
+    report.autoCollect?.trench ||
+    autoText.includes("left trench") ||
+    autoText.includes("right trench")
+  ) {
+    actions.push(
+      autoText.includes("right")
+        ? BACKEND_AUTO_ACTIONS[5]
+        : BACKEND_AUTO_ACTIONS[3],
+    );
+  }
+  if (report.autoMake > 0 || autoText.includes("shoot")) {
+    actions.push(BACKEND_AUTO_ACTIONS[6]);
+  }
+  if (report.autoClimb === "Yes" || autoText.includes("climb")) {
+    actions.push(BACKEND_AUTO_ACTIONS[7]);
+  }
+
+  const startingPosition = report.startPos
+    ? mapStartingPositionToBackend(report.startPos)
+    : autoText.includes("left")
+      ? BACKEND_STARTING_POSITIONS[0]
+      : autoText.includes("right")
+        ? BACKEND_STARTING_POSITIONS[4]
+        : BACKEND_STARTING_POSITIONS[3];
+
+  return [
+    {
+      startingPosition,
+      actions,
+      expectedHubScores: Math.max(0, parseInt(String(report.autoMake || 0), 10) || 0),
+    },
+  ];
+};
+
+const buildPitFormData = (report: any) => {
+  const formData = new FormData();
+  const eventCode = normalizeNumericString(report.eventCode || "2026A", "2026A")
+    .substring(0, 5)
+    .padEnd(5, "A");
+
+  formData.append("createdAt", new Date().toISOString());
+  formData.append("eventCode", eventCode);
+  formData.append("teamNumber", clampPositiveInt(report.teamNumber, 1).toString());
+  formData.append("drivetrain", mapDrivetrainToBackend(report.drivetrain));
+  formData.append("shooter", mapShooterToBackend(report.shooter));
+  formData.append("indexer", report.indexer || "VERTICAL");
+  formData.append("estimatedBps", normalizeNumericString(report.estimatedBps, ""));
+  formData.append("hopperCapacity", clampPositiveInt(report.hopperCapacity, 1).toString());
+  formData.append("climbLevel", String(Math.min(3, Math.max(0, parseInt(report.climbLevel || "0", 10) || 0))));
+  formData.append("canPass", report.canPass ? "true" : "false");
+  formData.append("canDefend", report.canDefend ? "true" : "false");
+  formData.append("canCrossBump", report.canCrossBump ? "true" : "false");
+  formData.append("canCrossTrench", report.canCrossTrench ? "true" : "false");
+  buildAutoRoutinesPayload(report).forEach((routine) => {
+    formData.append("autoRoutines", JSON.stringify(routine));
+  });
+  formData.append("driverEvents", String(Math.max(0, parseInt(report.driverEvents || "0", 10) || 0)));
+  formData.append("weightLbs", String(clampPositiveInt(report.weightLbs, 1)));
+  formData.append("notes", String(report.notes || "").slice(0, 400));
+
+  if (report.photoUri) {
+    formData.append("photo", {
+      uri: report.photoUri,
+      name: report.photoName || "pit-photo.jpg",
+      type: report.photoType || "image/jpeg",
+    } as any);
+  } else {
+    formData.append("photo", "");
+  }
+
+  return formData;
+};
+
+const buildLocalPitRecord = (report: any, photoBase64: string, photoUri: string, photoName: string, photoType: string) => ({
+  id: Date.now().toString(),
+  createdAt: new Date().toISOString(),
+  syncState: "local",
+  eventCode: normalizeNumericString(report.eventCode || "2026A", "2026A").substring(0, 5).padEnd(5, "A"),
+  teamNumber: report.teamNumber,
+  drivetrain: report.drivetrain,
+  shooter: report.shooter,
+  indexer: report.indexer,
+  estimatedBps: report.estimatedBps,
+  hopperCapacity: report.hopperCapacity,
+  climbLevel: report.climbLevel,
+  canPass: report.canPass,
+  canDefend: report.canDefend,
+  canCrossBump: report.canCrossBump,
+  canCrossTrench: report.canCrossTrench,
+  autoRoutines: report.autoRoutines,
+  driverEvents: report.driverEvents,
+  weightLbs: report.weightLbs,
+  notes: report.notes,
+  photoBase64,
+  photoUri,
+  photoName,
+  photoType,
+});
+
+const normalizeBackendPitReport = (report: any) => ({
+  id: `backend-${report.id}`,
+  createdAt: report.createdAt || new Date().toISOString(),
+  syncState: "backend",
+  backendId: report.id,
+  eventCode: report.eventCode || "",
+  teamNumber: String(report.teamNumber || ""),
+  drivetrain: report.drivetrain || "SWERVE",
+  shooter: report.shooter || "SINGLE",
+  indexer: report.indexer || "VERTICAL",
+  estimatedBps: String(report.estimatedBps ?? ""),
+  hopperCapacity: String(report.hopperCapacity ?? ""),
+  climbLevel: String(report.climbLevel ?? "0"),
+  canPass: Boolean(report.canPass),
+  canDefend: Boolean(report.canDefend),
+  canCrossBump: Boolean(report.canCrossBump),
+  canCrossTrench: Boolean(report.canCrossTrench),
+  autoRoutines: Array.isArray(report.autoRoutines) ? report.autoRoutines : [],
+  driverEvents: String(report.driverEvents ?? ""),
+  weightLbs: String(report.weightLbs ?? ""),
+  notes: report.notes || "",
+  photoId: report.photoId || null,
+  user: report.user || null,
+});
+
 export default function PitScoutingView({
   onBack,
   username,
@@ -27,6 +236,9 @@ export default function PitScoutingView({
   const [loading, setLoading] = useState(false);
   const [viewingSaved, setViewingSaved] = useState(false);
   const [savedReports, setSavedReports] = useState<any[]>([]);
+  const [backendReports, setBackendReports] = useState<any[]>([]);
+  const [backendStatus, setBackendStatus] = useState<"idle" | "loading" | "online" | "offline">("idle");
+  const [backendMessage, setBackendMessage] = useState("Not checked yet");
   const [selectedTeams, setSelectedTeams] = useState<string[]>([]);
   const [teamInput, setTeamInput] = useState("");
   const [printLayout, setPrintLayout] = useState<"expanded" | "compact">(
@@ -35,21 +247,32 @@ export default function PitScoutingView({
   const [showQRFor, setShowQRFor] = useState<any>(null);
 
   const [form, setForm] = useState({
+    eventCode: "2026A",
     teamNumber: "",
     drivetrain: "Swerve",
     shooter: "Single Shooter",
     hasDrumShooter: false,
+    indexer: "VERTICAL",
     estimatedBps: "",
     driverExperience: "",
+    hopperCapacity: "1",
     weight: "",
     width: "",
     length: "",
     autoRoutines: "",
     canFerry: false,
+    canPass: false,
+    canDefend: false,
     canClimb: false,
     climbLevels: [] as number[],
+    climbLevel: "0",
+    canCrossBump: false,
+    canCrossTrench: false,
     notes: "",
     photoBase64: "",
+    photoUri: "",
+    photoName: "",
+    photoType: "image/jpeg",
   });
 
   const loadReports = async () => {
@@ -60,9 +283,46 @@ export default function PitScoutingView({
     } catch (_e) {}
   };
 
+  const loadBackendReports = async () => {
+    if (!token) {
+      setBackendStatus("offline");
+      setBackendMessage("Signed out");
+      setBackendReports([]);
+      return;
+    }
+
+    setBackendStatus("loading");
+    setBackendMessage("Syncing with backend...");
+
+    try {
+      const res = await fetch(`${apiUrl}/get-pit-reports`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ take: 25, skip: 0 }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Backend returned ${res.status}`);
+      }
+
+      const data = await res.json();
+      setBackendReports((data || []).map(normalizeBackendPitReport));
+      setBackendStatus("online");
+      setBackendMessage(`Synced ${Array.isArray(data) ? data.length : 0} reports from backend`);
+    } catch (error: any) {
+      setBackendReports([]);
+      setBackendStatus("offline");
+      setBackendMessage(error?.message || "Could not reach backend");
+    }
+  };
+
   useEffect(() => {
     loadReports();
-  }, [loadReports]);
+    loadBackendReports();
+  }, []);
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -72,8 +332,15 @@ export default function PitScoutingView({
       base64: true,
     });
 
-    if (!result.canceled && result.assets && result.assets[0].base64) {
-      setForm({ ...form, photoBase64: result.assets[0].base64 });
+    if (!result.canceled && result.assets && result.assets[0]) {
+      const asset = result.assets[0];
+      setForm({
+        ...form,
+        photoBase64: asset.base64 || "",
+        photoUri: asset.uri || "",
+        photoName: asset.fileName || "pit-photo.jpg",
+        photoType: asset.mimeType || "image/jpeg",
+      });
     }
   };
 
@@ -83,46 +350,126 @@ export default function PitScoutingView({
     setLoading(true);
 
     try {
-      const newReport = {
-        id: Date.now().toString(),
-        createdAt: new Date().toISOString(),
+      const localRecord = buildLocalPitRecord(
+        {
+          ...form,
+          canPass: form.canFerry,
+          canDefend: form.canDefend,
+          canCrossBump: form.canCrossBump,
+          canCrossTrench: form.canCrossTrench,
+          climbLevel: form.canClimb
+            ? String(
+                Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0),
+              )
+            : "0",
+        },
+        form.photoBase64,
+        form.photoUri,
+        form.photoName,
+        form.photoType,
+      );
+
+      const backendPayload = {
         ...form,
+        teamNumber: form.teamNumber,
+        eventCode: form.eventCode,
+        drivetrain: form.drivetrain,
+        shooter: form.shooter,
+        indexer: form.indexer,
+        estimatedBps: normalizeNumericString(form.estimatedBps, ""),
+        hopperCapacity: form.hopperCapacity,
+        climbLevel: form.canClimb
+          ? String(
+              Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0),
+            )
+          : "0",
+        canPass: form.canFerry,
+        canDefend: form.canDefend,
+        canCrossBump: form.canCrossBump,
+        canCrossTrench: form.canCrossTrench,
+        driverEvents: form.driverExperience,
+        weightLbs: form.weight,
       };
+
+      let backendSaved = false;
+      if (token) {
+        try {
+          const res = await fetch(`${apiUrl}/pit-report`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+            body: buildPitFormData({
+              ...backendPayload,
+              autoCollect: {
+                outpost: false,
+                depot: false,
+              },
+              autoMake: 0,
+              autoClimb: "None",
+            }),
+          });
+
+          backendSaved = res.status === 201;
+          if (!backendSaved) {
+            const responseText = await res.text();
+            console.warn("Pit report backend save failed", res.status, responseText);
+          }
+        } catch (backendError) {
+          console.warn("Could not submit pit report to backend", backendError);
+        }
+      }
 
       const existingData = await AsyncStorage.getItem("@local_pit_reports");
       const allReports = existingData ? JSON.parse(existingData) : [];
 
       const idx = allReports.findIndex(
-        (r: any) => r.teamNumber === newReport.teamNumber,
+        (r: any) => r.teamNumber === localRecord.teamNumber,
       );
       if (idx >= 0)
-        allReports[idx] = newReport; // overwrite
-      else allReports.unshift(newReport);
+        allReports[idx] = localRecord; // overwrite
+      else allReports.unshift(localRecord);
 
       await AsyncStorage.setItem(
         "@local_pit_reports",
         JSON.stringify(allReports),
       );
       setSavedReports(allReports);
+      await loadBackendReports();
 
       Alert.alert(
-        "Success",
-        `Local Pit Data for Team ${form.teamNumber} saved!`,
+        backendSaved ? "Success" : "Saved Locally",
+        backendSaved
+          ? `Pit report for Team ${form.teamNumber} saved to backend and device.`
+          : `Pit report for Team ${form.teamNumber} saved on this device. Backend sync was not confirmed.`,
       );
       setForm({
-        ...form,
+        eventCode: form.eventCode,
         teamNumber: "",
-        hasDrumShooter: false,
         estimatedBps: "",
         driverExperience: "",
+        hopperCapacity: "1",
         weight: "",
         width: "",
         length: "",
         autoRoutines: "",
         notes: "",
         photoBase64: "",
+        photoUri: "",
+        photoName: "",
+        photoType: "image/jpeg",
+        hasDrumShooter: false,
+        canPass: false,
         canFerry: false,
+        canDefend: false,
         climbLevels: [],
+        climbLevel: "0",
+        canCrossBump: false,
+        canCrossTrench: false,
+        indexer: "VERTICAL",
+        shooter: "Single Shooter",
+        drivetrain: "Swerve",
+        canClimb: false,
       });
     } catch (_e) {
       Alert.alert("Error", "Could not save pit report locally.");
@@ -380,10 +727,36 @@ export default function PitScoutingView({
         </TouchableOpacity>
       </View>
 
+      <View style={styles.backendCard}>
+        <Text style={styles.backendTitle}>Backend Sync</Text>
+        <Text style={styles.backendSubtitle}>
+          {backendStatus === "online"
+            ? "Connected to pit-report endpoints"
+            : backendStatus === "loading"
+              ? "Checking backend connection..."
+              : backendStatus === "offline"
+                ? "Backend not reachable right now"
+                : "Backend connection has not been checked yet"}
+        </Text>
+        <Text style={styles.backendBody}>URL: {apiUrl}</Text>
+        <Text style={styles.backendBody}>{backendMessage}</Text>
+        <TouchableOpacity
+          style={styles.backendRefreshBtn}
+          onPress={loadBackendReports}
+          disabled={backendStatus === "loading"}
+        >
+          {backendStatus === "loading" ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.backendRefreshText}>Refresh Backend Reports</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+
       {viewingSaved ? (
         <View>
           <Text style={{ color: "#fff", fontSize: 18, marginBottom: 10 }}>
-            Local Pit Reports
+            Saved Pit Reports
           </Text>
           <Text style={styles.helperText}>Choose teams: 254, 1678, 118</Text>
           <TextInput
@@ -439,6 +812,28 @@ export default function PitScoutingView({
               {printLayout === "compact" ? "Compact" : "Detailed"})
             </Text>
           </TouchableOpacity>
+
+          <View style={styles.backendListCard}>
+            <Text style={styles.backendListTitle}>Recent Backend Reports</Text>
+            {backendReports.length === 0 ? (
+              <Text style={styles.backendListEmpty}>
+                No backend pit reports loaded yet.
+              </Text>
+            ) : (
+              backendReports.map((report) => (
+                <View key={report.id} style={styles.backendListItem}>
+                  <Text style={styles.backendListItemTitle}>
+                    Team {report.teamNumber} · {report.eventCode || "-----"}
+                  </Text>
+                  <Text style={styles.backendListItemBody}>
+                    {report.user
+                      ? `${report.user.firstName} ${report.user.lastName}`
+                      : "No user attached"}
+                  </Text>
+                </View>
+              ))
+            )}
+          </View>
 
           {savedReports.length === 0 && (
             <Text style={{ color: "#888" }}>No reports saved yet.</Text>
@@ -552,6 +947,16 @@ export default function PitScoutingView({
         </View>
       ) : (
         <View style={styles.card}>
+          <Text style={styles.label}>Event Code</Text>
+          <TextInput
+            style={styles.input}
+            autoCapitalize="characters"
+            placeholder="2026A"
+            placeholderTextColor="#666"
+            value={form.eventCode}
+            onChangeText={(t) => setForm({ ...form, eventCode: t.toUpperCase().slice(0, 5) })}
+          />
+
           <Text style={styles.label}>Team Number</Text>
           <TextInput
             style={[styles.input, { fontSize: 24, fontWeight: "bold" }]}
@@ -585,9 +990,49 @@ export default function PitScoutingView({
             ))}
           </View>
 
+          <Text style={styles.label}>Pit Hardware</Text>
+          <View style={styles.row}>
+            {BACKEND_INDEXERS.map((indexer) => (
+              <TouchableOpacity
+                key={indexer}
+                style={[
+                  styles.optionBtn,
+                  form.indexer === indexer && styles.activeBtn,
+                ]}
+                onPress={() => setForm({ ...form, indexer })}
+              >
+                <Text
+                  style={[
+                    styles.btnText,
+                    form.indexer === indexer && styles.activeText,
+                  ]}
+                >
+                  {indexer}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.label}>Hopper Capacity</Text>
+          <TextInput
+            style={styles.input}
+            keyboardType="numeric"
+            placeholder="e.g. 60"
+            placeholderTextColor="#666"
+            value={form.hopperCapacity}
+            onChangeText={(t) => setForm({ ...form, hopperCapacity: t })}
+          />
+
           <Text style={styles.label}>Shooter Type</Text>
           <View style={styles.row}>
-            {["Single Shooter", "Dual Shooter", "Triple Shooter", "Turret"].map(
+            {[
+              "Single Shooter",
+              "Dual Shooter",
+              "Triple Shooter",
+              "Turret",
+              "Drum",
+              "Other",
+            ].map(
               (type) => (
                 <TouchableOpacity
                   key={type}
@@ -621,6 +1066,46 @@ export default function PitScoutingView({
           >
             <Text style={styles.toggleText}>
               Do they have a Drum Shooter? {form.hasDrumShooter ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canFerry && styles.activeGreen]}
+            onPress={() => setForm({ ...form, canFerry: !form.canFerry })}
+          >
+            <Text style={styles.toggleText}>
+              Can they Pass? {form.canFerry ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canDefend && styles.activeGreen]}
+            onPress={() => setForm({ ...form, canDefend: !form.canDefend })}
+          >
+            <Text style={styles.toggleText}>
+              Can they Defend? {form.canDefend ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canCrossBump && styles.activeGreen]}
+            onPress={() =>
+              setForm({ ...form, canCrossBump: !form.canCrossBump })
+            }
+          >
+            <Text style={styles.toggleText}>
+              Can Cross Bump? {form.canCrossBump ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canCrossTrench && styles.activeGreen]}
+            onPress={() =>
+              setForm({ ...form, canCrossTrench: !form.canCrossTrench })
+            }
+          >
+            <Text style={styles.toggleText}>
+              Can Cross Trench? {form.canCrossTrench ? "YES" : "NO"}
             </Text>
           </TouchableOpacity>
 
@@ -788,7 +1273,7 @@ export default function PitScoutingView({
             {loading ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.saveText}>Save Pit Report Locally</Text>
+              <Text style={styles.saveText}>Save Pit Report</Text>
             )}
           </TouchableOpacity>
         </View>
@@ -807,6 +1292,78 @@ const styles = StyleSheet.create({
   },
   backLink: { color: "#0a84ff", fontSize: 16 },
   headerTitle: { color: "#fff", fontSize: 20, fontWeight: "bold" },
+  backendCard: {
+    backgroundColor: "#162233",
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#2e4f7f",
+    marginBottom: 15,
+  },
+  backendTitle: {
+    color: "#9ec5ff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  backendSubtitle: {
+    color: "#d7e6ff",
+    fontSize: 13,
+    marginBottom: 6,
+  },
+  backendBody: {
+    color: "#b8c7dc",
+    fontSize: 12,
+    marginBottom: 10,
+  },
+  backendRefreshBtn: {
+    backgroundColor: "#0a84ff",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  backendRefreshText: {
+    color: "#fff",
+    fontWeight: "700",
+  },
+  backendListCard: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#333",
+    padding: 12,
+    marginTop: 12,
+    marginBottom: 15,
+  },
+  backendListTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  backendListEmpty: {
+    color: "#888",
+    fontSize: 12,
+  },
+  backendListItem: {
+    backgroundColor: "#232323",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#2f2f2f",
+    padding: 10,
+    marginBottom: 8,
+  },
+  backendListItemTitle: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 14,
+    marginBottom: 3,
+  },
+  backendListItemBody: {
+    color: "#aaa",
+    fontSize: 12,
+  },
   card: {
     backgroundColor: "#1e1e1e",
     padding: 20,

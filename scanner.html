@@ -134,9 +134,9 @@ tr:hover{background:rgba(255,255,255,.05)}
         <p style="font-size:12px;color:#aaa">One-page match report grouped by Red/Blue with positions and conflicts. Uses scouting station info first.</p>
         <input id="print-match-input" type="number" placeholder="Enter Match # (e.g. 18)" style="font-size:18px;text-align:center">
         <input id="tba-event-key-input" type="text" placeholder="Optional TBA Event Key (fallback only)">
-        <div style="display:flex; gap:10px; margin-bottom:10px;">
-          <input id="tba-api-key-input" type="password" placeholder="TBA API Key" style="flex:1" onchange="localStorage.setItem('@scanner_tba_key', this.value)">
-          <button onclick="var el=document.getElementById('tba-api-key-input'); el.type=el.type==='password'?'text':'password'" style="margin:0; padding:10px">👁️</button>
+        <div style="display:flex; gap:10px; margin-bottom:10px; align-items:stretch;">
+          <input id="tba-api-key-input" type="password" placeholder="TBA API Key" style="flex:1; min-width:0; margin-bottom:0" onchange="localStorage.setItem('@scanner_tba_key', this.value)">
+          <button onclick="var el=document.getElementById('tba-api-key-input'); el.type=el.type==='password'?'text':'password'" style="margin:0; padding:10px 12px; width:auto; min-width:48px; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; line-height:1">👁️</button>
         </div>
         <button onclick="fetch10079Schedule()" style="background:#22c55e; margin-bottom:15px">Fetch 10079 Schedule</button>
         <button onclick="printMatchReportFromInput()" style="background:#ff9500">Generate Match Report</button>
@@ -301,6 +301,7 @@ var ZXING_LOCAL_IIFE = "./scanner-assets/zxing/reader/index.js";
 var ZXING_LOCAL_WASM = "./scanner-assets/zxing/reader/zxing_reader.wasm";
 var ZXING_CDN_IIFE = "https://cdn.jsdelivr.net/npm/zxing-wasm@3.0.1/dist/iife/reader/index.js";
 var OFFLINE_QUEUE_KEY = "@scanner_pending_reports_v1";
+var LOCAL_RECENT_REPORTS_KEY = "@scanner_recent_reports_v1";
 var TBA_EVENT_KEY_STORAGE = "@scanner_tba_event_key_v1";
 var TBA_SCHEDULE_CACHE_PREFIX = "@scanner_tba_schedule_";
 
@@ -374,6 +375,87 @@ function fetchTimeout(url, opts){
   var t = setTimeout(function(){ ctrl.abort(); }, TIMEOUT);
   return fetch(url, Object.assign({}, opts, {signal: ctrl.signal}))
     .finally(function(){ clearTimeout(t); });
+}
+
+function normalizeReportList(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value && value.data)) return value.data;
+  if (Array.isArray(value && value.items)) return value.items;
+  if (Array.isArray(value && value.results)) return value.results;
+  if (Array.isArray(value && value.reports)) return value.reports;
+  return [];
+}
+
+function fetchReportList(take, skip){
+  var payload = { take: Number(take) || 40, skip: Number(skip) || 0 };
+
+  return fetchWithAuth(API_URL + "/get-reports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  .then(function(res){
+    if (res.status === 404) {
+      return fetchWithAuth(API_URL + "/reports?take=" + payload.take + "&skip=" + payload.skip, {});
+    }
+    return res;
+  })
+  .then(function(res){
+    if (!res.ok) throw new Error("report list failed (" + res.status + ")");
+    return res.json();
+  })
+  .then(function(data){ return normalizeReportList(data); });
+}
+
+function loadRecentReports(){
+  try {
+    var raw = localStorage.getItem(LOCAL_RECENT_REPORTS_KEY);
+    var parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(_e){
+    return [];
+  }
+}
+
+function saveRecentReports(items){
+  try {
+    localStorage.setItem(LOCAL_RECENT_REPORTS_KEY, JSON.stringify(items));
+  } catch(_e){
+    // Best effort cache only.
+  }
+}
+
+function upsertRecentReport(payload, statusText){
+  var list = loadRecentReports();
+  var key = String(payload.matchNumber) + "|" + String(payload.teamNumber);
+  var idx = list.findIndex(function(x){
+    return (String(x.matchNumber) + "|" + String(x.teamNumber)) === key;
+  });
+  var row = {
+    id: Date.now(),
+    matchNumber: payload.matchNumber,
+    teamNumber: payload.teamNumber,
+    username: "Local",
+    statusText: statusText || "Saved",
+  };
+  if (idx >= 0) list[idx] = row;
+  else list.unshift(row);
+  saveRecentReports(list.slice(0, 120));
+}
+
+function renderTableFromLocalCache(){
+  var rows = loadRecentReports();
+  if (!rows.length){
+    tableBody.innerHTML = "<tr class='empty-row'><td colspan='4'>No local cached matches yet.</td></tr>";
+    return;
+  }
+
+  tableBody.innerHTML = rows.map(function(r){
+    var mn = r.matchNumber || r.id || "?";
+    var sc = r.username || "Local";
+    var status = r.statusText || "Saved";
+    return "<tr><td style='font-weight:bold;color:#0a84ff'>Q" + mn + "</td><td style='font-weight:bold;font-size:1.1em'>" + r.teamNumber + "</td><td style='color:#aaa'>" + sc + "</td><td style='color:#ff9500'>[" + status + "]</td></tr>";
+  }).join("");
 }
 
 function log(msg, type){
@@ -1407,6 +1489,7 @@ function processSingleMatch(str){
     minorFouls: parseInt(p[22], 10) || 0,
     majorFouls: 0,
     secondsIncapacitated: incapSeconds,
+    secondsDead: incapSeconds,
     shootingConfidence: 3,
     auto:{
       notes: autoNotes.substring(0,400),
@@ -1432,24 +1515,33 @@ function processSingleMatch(str){
   .then(function(res){
     if(res.status === 201){
       log("Saved Match " + p[1] + " (Team " + p[2] + ")", "success");
+      upsertRecentReport(payload, "Saved");
       checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
     }
     return res.json().then(function(err){
       if(err.message && err.message.indexOf("Unique") !== -1){
         log("Match " + p[1] + " already saved. Skipped.", "info");
+        upsertRecentReport(payload, "Saved");
         checkUpcomingPrint(parseInt(p[1], 10));
         return {match:p[1], team:p[2]};
       }
+      log("Backend rejected Match " + p[1] + " (Team " + p[2] + "): " + (err.message || JSON.stringify(err)), "error");
       var queued = enqueuePendingReport(payload);
-      if(queued){ log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info"); }
+      if(queued){
+        log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
+        upsertRecentReport(payload, "Queued");
+      }
       checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
     });
   })
   .catch(function(_e){
     var queued = enqueuePendingReport(payload);
-    if(queued){ log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info"); } 
+    if(queued){
+      log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
+      upsertRecentReport(payload, "Queued");
+    }
     else { log("Already queued offline: Match " + p[1] + " (Team " + p[2] + ").", "info"); }
     checkUpcomingPrint(parseInt(p[1], 10));
     return {match:p[1], team:p[2]};
@@ -1998,11 +2090,10 @@ function tagAllVisibleWithActiveEvent() {
 
   if(!AUTH_TOKEN) return log("Must connect first.", "error");
 
-  fetchWithAuth(API_URL + "/reports?take=2000&skip=0", {})
-  .then(function(r){ return r.json(); })
+  fetchReportList(2000, 0)
   .then(function(data){
     var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
-    var visibleData = (data || []).filter(function(d){ return (d.id || Infinity) > hideId; });
+    var visibleData = data.filter(function(d){ return (d.id || Infinity) > hideId; });
     var count = 0;
     visibleData.forEach(function(r){
       if(r.id && eventTags[r.id] !== activeEventName){
@@ -2019,7 +2110,7 @@ function tagAllVisibleWithActiveEvent() {
 }
 
 function applyLocalFilters(all) {
-  if (!all) return [];
+  all = normalizeReportList(all);
   var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
   all = all.filter(function(d) { return (d.id || Infinity) > hideId; });
   
@@ -2047,13 +2138,10 @@ function applyLocalFilters(all) {
 // ─── DATA TABLE ──────────────────────────────────────────────────────────────
 function fetchData(){
   if(!AUTH_TOKEN) return;
-  
-  // NOTE: The standard /reports endpoint seems to only return basic info!
-  // We may need to get full stats. For now, let's keep fetching reports but request full data if possible.
-  fetchWithAuth(API_URL + "/reports?take=40&skip=0", {})
-  .then(function(r){ return r.json(); })
+
+  fetchReportList(40, 0)
   .then(function(data){
-    window.lastFetchedMaxId = (data || []).reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
+    window.lastFetchedMaxId = data.reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
     var visibleData = applyLocalFilters(data);
 
     visibleData.sort(function(a,b){ return b.id - a.id; });
@@ -2067,7 +2155,10 @@ function fetchData(){
       return "<tr><td style='font-weight:bold;color:#0a84ff;cursor:pointer;text-decoration:underline' onclick='printMatchReport("+Number(mn)+")' title='Print all 6 teams for this match'>Q"+mn+"</td><td style='font-weight:bold;font-size:1.1em'>"+r.teamNumber+"</td><td style='color:#aaa'>"+sc+"</td><td style='color:#4cd964'>["+evTag+"] Saved</td></tr>";
     }).join("") || "<tr class='empty-row'><td colspan='4'>No matches yet.</td></tr>";
   })
-  .catch(function(e){ log("Table sync error: " + e.message, "error"); });
+  .catch(function(e){
+    log("Table sync error: " + e.message, "error");
+    renderTableFromLocalCache();
+  });
 }
 
 // ─── PRINT ───────────────────────────────────────────────────────────────────
@@ -2263,8 +2354,7 @@ function printTeamReport(){
   // Try the stats endpoint first; fall back to raw reports on any non-200
   // Note: the backend `/reports` list endpoint usually only returns id, teamNumber, user. 
   // We need to fetch details for these specific reports!
-  fetchWithAuth(API_URL + "/reports?take=200&skip=0", {})
-  .then(function(r2){ return r2.json(); })
+  fetchReportList(200, 0)
   .then(function(all){
     all = applyLocalFilters(all);
     
@@ -2449,8 +2539,7 @@ function ensureScheduleMap(eventKey, apiKey){
 }
 
 function fetchAllFullReports(){
-  return fetchWithAuth(API_URL + "/reports?take=2000&skip=0", {})
-  .then(function(r){ return r.json(); })
+  return fetchReportList(2000, 0)
   .then(function(all){
     all = applyLocalFilters(all);
     var fullMatchPromises = all.map(function(m){
@@ -2800,8 +2889,7 @@ function printRankings(){
 
   // Since /stats/rankings is returning 404, we will fetch all reports, 
   // request their full details, map them by team, compute averages, and sort them top to bottom.
-  fetchWithAuth(API_URL + "/reports?take=2000&skip=0", {})
-  .then(function(r){ return r.json(); })
+  fetchReportList(2000, 0)
   .then(function(all){
     all = applyLocalFilters(all);
     
