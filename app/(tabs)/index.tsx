@@ -96,15 +96,15 @@ const INITIAL_MATCH_DATA: MatchData = {
 };
 
 // Reusable mini-components to keep our main screen code clean
-const CounterRow = ({ label, value, onChange, step = 1 }: any) => (
+const CounterRow = ({ label, value, onChange, plusStep = 1, minusStep = 1 }: any) => (
   <View style={styles.counterRow}>
     <Text style={styles.counterLabel}>{label}</Text>
     <View style={styles.stepper}>
-      <TouchableOpacity style={[styles.btn, styles.btnMinus]} onPress={() => onChange(-step)}>
+      <TouchableOpacity style={[styles.btn, styles.btnMinus]} onPress={() => onChange(-minusStep)}>
         <Text style={styles.btnText}>-</Text>
       </TouchableOpacity>
       <Text style={styles.countValue}>{value}</Text>
-      <TouchableOpacity style={[styles.btn, styles.btnPlus]} onPress={() => onChange(step)}>
+      <TouchableOpacity style={[styles.btn, styles.btnPlus]} onPress={() => onChange(plusStep)}>
         <Text style={styles.btnText}>+</Text>
       </TouchableOpacity>
     </View>
@@ -199,6 +199,12 @@ const suggestBallIncrement = (avgScore: number): number => {
   if (avgScore > 200) return 10;
   if (avgScore > 100) return 5;
   return 3;
+};
+
+const suggestMinusIncrement = (suggestedPlus: number): number => {
+  if (suggestedPlus === 10) return 5;
+  if (suggestedPlus === 5) return 3;
+  return 1;
 };
 
 // Screens
@@ -423,7 +429,11 @@ const DashboardView = ({
   );
 };
 
-const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrement }: any) => {
+const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrement, setBallIncrement, minusIncrement, setMinusIncrement, historyQueue }: any) => {
+  const avgScore = form.teamNumber ? calculateAverageTeamScore(historyQueue || [], form.teamNumber) : 0;
+  const suggestedIncrement = avgScore > 0 ? suggestBallIncrement(avgScore) : null;
+  const suggestedMinusIncrement = suggestedIncrement ? suggestMinusIncrement(suggestedIncrement) : null;
+
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -432,6 +442,51 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
           <TouchableOpacity onPress={onCancel}><Text style={styles.backLink}>← Cancel</Text></TouchableOpacity>
           <Text style={styles.headerTitle}>{station}</Text>
           <View style={{ width: 40 }} /> 
+        </View>
+
+        {/* --- Increment Settings --- */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>Counter Increments</Text>
+
+          {avgScore > 0 ? (
+            <View style={{ backgroundColor: '#1a3a2a', padding: 10, borderRadius: 8, marginBottom: 15, borderLeftWidth: 3, borderLeftColor: '#4cd964' }}>
+              <Text style={{ color: '#4cd964', fontWeight: 'bold', fontSize: 12 }}>
+                Team {form.teamNumber} Avg Score: {avgScore} pts
+              </Text>
+              <Text style={{ color: '#aaa', fontSize: 11, marginTop: 4 }}>
+                Suggested to use: +{suggestedIncrement} and -{suggestedMinusIncrement}
+              </Text>
+            </View>
+          ) : (
+            <View style={{ backgroundColor: '#2c2c2c', padding: 10, borderRadius: 8, marginBottom: 15, borderLeftWidth: 3, borderLeftColor: '#666' }}>
+              <Text style={{ color: '#aaa', fontSize: 11 }}>
+                {form.teamNumber ? `No previous match data internally for Team ${form.teamNumber} yet.` : 'Enter a Team # to see a suggested increment.'}
+              </Text>
+            </View>
+          )}
+
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.label}>+ Increment</Text>
+              <View style={{ flexDirection: 'row', gap: 5 }}>
+                 {[1, 3, 5, 10].map(v => (
+                    <TouchableOpacity key={"plus"+v} style={[styles.optionBtn, ballIncrement === v ? styles.optionBtnActive : null, { flex: 1, paddingHorizontal: 0, alignItems: 'center' }]} onPress={() => { setBallIncrement(v); AsyncStorage.setItem('@ball_increment', v.toString()); }}>
+                       <Text style={[styles.optionBtnText, ballIncrement === v ? styles.textActive : null, { fontSize: 13 }]}>+{v}</Text>
+                    </TouchableOpacity>
+                 ))}
+              </View>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.label}>- Increment</Text>
+              <View style={{ flexDirection: 'row', gap: 5 }}>
+                 {[1, 3, 5].map(v => (
+                    <TouchableOpacity key={"minus"+v} style={[styles.optionBtn, minusIncrement === v ? styles.optionBtnActive : null, { flex: 1, paddingHorizontal: 0, alignItems: 'center' }]} onPress={() => { setMinusIncrement(v); AsyncStorage.setItem('@minus_increment', v.toString()); }}>
+                       <Text style={[styles.optionBtnText, minusIncrement === v ? styles.textActive : null, { fontSize: 13 }]}>-{v}</Text>
+                    </TouchableOpacity>
+                 ))}
+              </View>
+            </View>
+          </View>
         </View>
 
         {/* --- Match Setup --- */}
@@ -472,7 +527,7 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
 
           <View style={styles.divider} />
 
-          <CounterRow label={`Makes (Fuel) +${ballIncrement}`} value={form.autoMake} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
+          <CounterRow label={`Makes (Fuel) +${ballIncrement}`} value={form.autoMake} plusStep={ballIncrement} minusStep={minusIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMake: Math.max(0, p.autoMake + v) }))} />
           <CounterRow label="Miss (Fuel)" value={form.autoMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, autoMiss: Math.max(0, p.autoMiss + v) }))} />
           
           <Text style={styles.label}>Pass Volume</Text>
@@ -525,9 +580,9 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
 
           <View style={styles.divider} />
 
-          <CounterRow label={`Hits (Fuel) +${ballIncrement}`} value={form.teleMake} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
+          <CounterRow label={`Hits (Fuel) +${ballIncrement}`} value={form.teleMake} plusStep={ballIncrement} minusStep={minusIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMake: Math.max(0, p.teleMake + v) }))} />
           <CounterRow label="Misses" value={form.teleMiss} onChange={(v: number) => setForm((p: any) => ({ ...p, teleMiss: Math.max(0, p.teleMiss + v) }))} />
-          <CounterRow label={`Ferry Volume +${ballIncrement}`} value={form.teleFerry} step={ballIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleFerry: Math.max(0, p.teleFerry + v) }))} />
+          <CounterRow label={`Ferry Volume +${ballIncrement}`} value={form.teleFerry} plusStep={ballIncrement} minusStep={minusIncrement} onChange={(v: number) => setForm((p: any) => ({ ...p, teleFerry: Math.max(0, p.teleFerry + v) }))} />
 
           <View style={styles.divider} />
 
@@ -633,6 +688,7 @@ export default function App() {
   const [newMasterKeyInput, setNewMasterKeyInput] = useState('');
   const [textCompression, setTextCompression] = useState('Default');
   const [ballIncrement, setBallIncrement] = useState(5);
+  const [minusIncrement, setMinusIncrement] = useState(1);
 
   const [station, setStation] = useState<Station | ''>('');
   const [matchesScouted, setMatchesScouted] = useState(0);
@@ -677,9 +733,8 @@ export default function App() {
     AsyncStorage.getItem('@master_seat_key').then(k => {
       if (k) setMasterSeatKey(k);
     });
-    AsyncStorage.getItem('@ball_increment').then(bi => {
-      if (bi) setBallIncrement(parseInt(bi, 10));
-    });
+    AsyncStorage.getItem('@ball_increment').then(bi => { if (bi) setBallIncrement(parseInt(bi, 10)); });
+    AsyncStorage.getItem('@minus_increment').then(mi => { if (mi) setMinusIncrement(parseInt(mi, 10)); });
     AsyncStorage.getItem('@refresh_token').then(t => {
       if (t) setRefreshToken(t);
     });
@@ -721,11 +776,15 @@ export default function App() {
   }, [username]);
 
   useEffect(() => {
-    if (form.matchType === 'Qual' && schedule[form.matchNumber] && station) {
-      const assigned = schedule[form.matchNumber][station];
-      if (assigned) setForm(p => ({ ...p, teamNumber: assigned, station }));
+    if (form.matchType === 'Qual' && station) {
+      if (schedule && schedule[form.matchNumber] && schedule[form.matchNumber][station]) {
+        const assigned = schedule[form.matchNumber][station];
+        setForm(p => ({ ...p, teamNumber: assigned, station }));
+      } else if (schedule && Object.keys(schedule).length > 0) {
+        setForm(p => ({ ...p, teamNumber: '', station }));
+      }
     }
-  }, [form.matchNumber, station, form.matchType, schedule]);
+  }, [form.matchNumber, station, form.matchType]);
 
   const handleLogin = async () => {
     setErrorMessage('');
@@ -868,7 +927,9 @@ export default function App() {
       fullNotes,                                                 // 17 (Notes)
       safeAutoNotes,                                             // 18 (Auto Notes specifically)
       safeTeleNotes,                                             // 19 (Teleop Notes specifically)
-      form.defended                                              // 20
+      form.defended,                                             // 20
+      station,                                                   // 21
+      form.fouls                                                 // 22
     ].join('|');
 
     // Attempt to submit to backend real-time matching the required schema strictly
@@ -877,24 +938,20 @@ export default function App() {
       eventCode: form.eventCode.substring(0, 5).padEnd(5, 'A'),
       matchType: form.matchType === 'Play' ? 'PLAYOFF' : 'QUALIFICATION',
       matchNumber: parseInt(form.matchNumber || "1", 10),
+      alliance: station && station.startsWith('Blue') ? 'BLUE' : 'RED',
       teamNumber: parseInt(form.teamNumber || "1", 10),
+      inMatch: true,
       notes: fullNotes.substring(0, 400),
       minorFouls: form.fouls,
       majorFouls: 0,
       secondsIncapacitated: parseInt(effectiveDeadTime, 10),
-      overBump: form.bumpCross,
-      underTrench: form.trenchCross,
-      startingPosition: form.startPos.toUpperCase(),
+      shootingConfidence: 3,
       auto: {
         notes: safeAutoNotes.substring(0, 400),
         hubScores: form.autoMake,
         hubMisses: form.autoMiss,
         climb: form.autoClimb === 'Yes' ? 'LEVEL1' : (form.autoClimb === 'Fail' ? 'FAILED' : 'NONE'),
         passes: form.autoPassVol === 'High' ? 3 : (form.autoPassVol === 'Med' ? 2 : (form.autoPassVol === 'Low' ? 1 : 0)),
-        collectDepot: form.autoCollect.depot,
-        collectNeutral: form.autoCollect.neutral,
-        collectOutpost: form.autoCollect.outpost,
-        disruptNz: false
       },
       teleop: {
         notes: safeTeleNotes.substring(0, 400),
@@ -903,7 +960,8 @@ export default function App() {
         level: 0,
         climbFailed: false,
         defended: form.defended,
-        passes: form.teleFerry
+        wasDefended: false,
+        passes: form.teleFerry,
       },
       endgame: {
         notes: '',
@@ -916,7 +974,7 @@ export default function App() {
 
     try {
       if (token) {
-        const res = await fetch(`${apiUrl}/report`, {
+        let res = await fetch(`${apiUrl}/report`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -924,6 +982,32 @@ export default function App() {
           },
           body: JSON.stringify(reportPayload)
         });
+
+        if (res.status === 401 && refreshToken) {
+          try {
+            const refreshRes = await fetch(`${apiUrl}/auth/refresh`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain' },
+              body: refreshToken
+            });
+            if (refreshRes.status === 201) {
+               const data = await refreshRes.json();
+               setToken(data.accessToken);
+               setRefreshToken(data.refreshToken);
+               await AsyncStorage.setItem('@refresh_token', data.refreshToken);
+               res = await fetch(`${apiUrl}/report`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${data.accessToken}`
+                  },
+                  body: JSON.stringify(reportPayload)
+               });
+            }
+          } catch(e) {
+            console.warn("Failed to refresh token", e);
+          }
+        }
         
         if (res.status !== 201) {
           console.warn("Failed to submit report to backend online");
@@ -1161,18 +1245,25 @@ export default function App() {
               {(() => {
                 const avgScore = form.teamNumber ? calculateAverageTeamScore(historyQueue, form.teamNumber) : 0;
                 const suggested = avgScore > 0 ? suggestBallIncrement(avgScore) : 5;
+                const suggestedMinus = suggestMinusIncrement(suggested);
                 return (
                   <>
-                    {avgScore > 0 && (
-                      <View style={{ backgroundColor: '#1a3a2a', padding: 10, borderRadius: 8, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#4cd964' }}>
-                        <Text style={{ color: '#4cd964', fontWeight: 'bold', fontSize: 12 }}>
-                          Team {form.teamNumber} Avg Score: {avgScore} pts
-                        </Text>
-                        <Text style={{ color: '#aaa', fontSize: 11, marginTop: 4 }}>
-                          Suggested increment: +{suggested}
-                        </Text>
-                      </View>
-                    )}
+                  {avgScore > 0 ? (
+                    <View style={{ backgroundColor: '#1a3a2a', padding: 10, borderRadius: 8, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#4cd964' }}>
+                      <Text style={{ color: '#4cd964', fontWeight: 'bold', fontSize: 12 }}>
+                        Team {form.teamNumber} Avg Score: {avgScore} pts
+                      </Text>
+                      <Text style={{ color: '#aaa', fontSize: 11, marginTop: 4 }}>
+                        Suggested: +{suggested} and -{suggestedMinus}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={{ backgroundColor: '#2c2c2c', padding: 10, borderRadius: 8, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#666' }}>
+                      <Text style={{ color: '#aaa', fontSize: 11 }}>
+                        Once you enter a match/team, history-based suggestions will appear here.
+                      </Text>
+                    </View>
+                  )}
                   </>
                 );
               })()}
@@ -1400,6 +1491,10 @@ export default function App() {
           onSave={handleSaveMatch} 
           onCancel={() => setCurrentView('dashboard')}
           ballIncrement={ballIncrement}
+          setBallIncrement={setBallIncrement}
+          minusIncrement={minusIncrement}
+          setMinusIncrement={setMinusIncrement}
+          historyQueue={historyQueue}
         />
       )}
       
