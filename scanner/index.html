@@ -32,6 +32,14 @@
           >
             Print Reports
           </button>
+          <button
+            onclick="switchTab('alliance')"
+            id="nav-alliance-btn"
+            class="secondary"
+            style="width: auto; padding: 5px 15px; font-size: 12px; background: #8a2be2"
+          >
+            Alliance Sel.
+          </button>
           <div id="connection-status" class="status-badge">DISCONNECTED</div>
         </div>
       </div>
@@ -142,6 +150,98 @@
         </div>
       </div>
 
+      <!-- ALLIANCE SELECTION -->
+  <div id="alliance-section" class="hidden" style="text-align:left">
+    <div style="margin-bottom:15px; border-bottom: 1px solid #333; padding-bottom: 15px; display:flex; justify-content:space-between; align-items:center;">
+      <div>
+        <h2 style="margin:0; font-size:24px; color:#0a84ff">Alliance Selection Mode</h2>
+        <p style="margin:5px 0 0 0;color:#aaa;font-size:13px">Drive team strategy, pick lists, and deep-dives.</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#ccc;cursor:pointer">
+          <input type="checkbox" id="alliance-datasource-statbotics" onchange="loadAllianceData()" style="width:auto;margin:0"> Use Statbotics (Online)
+        </label>
+        <button onclick="loadAllianceData()" style="width:auto;margin:0;background:#0a84ff;padding:10px 15px">Refresh Data</button>
+        <button onclick="printAllianceSheet()" style="width:auto;margin:0;background:#22c55e;padding:10px 15px">Print Cheat Sheet</button>
+      </div>
+    </div>
+
+    <!-- Statbotics Prediction -->
+    <div id="statbotics-pred-card" class="alliance-card hidden" style="margin-bottom:20px; border-color:#0a84ff;">
+      <h3 style="margin-top:0;color:#0a84ff;display:flex;justify-content:space-between">
+        Statbotics Setup & Predictor
+        <span id="sb-pred-status" style="font-size:12px;color:#888;font-weight:normal">Waiting...</span>
+      </h3>
+      <div style="display:flex;gap:10px;margin-bottom:10px">
+        <input id="sb-year-input" type="number" placeholder="Year" value="2024" style="width:80px;margin:0;font-family:monospace">
+        <input id="sb-event-input" type="text" placeholder="Event (e.g. wasno)" style="flex:1;margin:0;font-family:monospace" onchange="if($('alliance-datasource-statbotics').checked) loadAllianceData();">
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:15px">
+        <input id="sb-match-input" type="number" placeholder="Match #" style="flex:1;margin:0;font-family:monospace">
+        <button onclick="fetchStatboticsPrediction()" style="width:auto;margin:0;background:#0a84ff">Get Odds</button>
+      </div>
+      <div id="sb-pred-result" style="display:none;background:#1a1a1a;padding:15px;border-radius:6px;font-size:14px;"></div>
+    </div>
+
+    <!-- Overview / Top Picks / DNP -->
+    <div class="alliance-grid">
+      <div class="alliance-card">
+        <h3 style="margin-top:0;color:#34d399">Recommended Picks (Top 10)</h3>
+        <p style="font-size:11px;color:#888;margin-top:-5px">Weighted by Auto, Tele, Climbs, Ferry. Penalized for downtime.</p>
+        <div id="alliance-recommended-list" style="max-height:250px;overflow-y:auto;font-size:13px;"></div>
+      </div>
+      <div class="alliance-card">
+        <h3 style="margin-top:0;color:#ff453a">Do Not Pick / High Risk</h3>
+        <p style="font-size:11px;color:#888;margin-top:-5px">Teams with significant incapacitation or high failure rates.</p>
+        <div id="alliance-dnp-list" style="max-height:250px;overflow-y:auto;font-size:13px;"></div>
+      </div>
+    </div>
+
+    <!-- Predicted Pick List -->
+    <div class="alliance-card" style="margin-bottom:20px">
+      <h3 style="margin-top:0;color:#a855f7">Predicted Pick List (Snake Draft)</h3>
+      <p style="font-size:11px;color:#888;margin-top:-5px" id="predicted-list-subtitle">Based on calculated Power Rank (Local or Statbotics)</p>
+      <div id="predicted-alliances-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size:13px; margin-top:10px;">
+        <!-- Filled by JS -->
+      </div>
+    </div>
+
+    <!-- Deep Dive -->
+    <div class="alliance-card" style="margin-bottom:20px">
+      <h3 style="margin-top:0">Team Deep-Dive & Match Timeline</h3>
+      <div style="display:flex;gap:10px;margin-bottom:15px">
+        <input id="alliance-search-input" type="number" placeholder="Enter Team # (e.g. 254)" style="width:200px;margin:0">
+        <button onclick="renderTeamDeepDive()" style="width:auto;margin:0">Analyze Team</button>
+      </div>
+      <div id="alliance-deep-dive-content" style="display:none;background:#1a1a1a;padding:15px;border-radius:6px">
+      </div>
+    </div>
+
+    <!-- Full Roster -->
+    <div class="alliance-card">
+      <h3 style="margin-top:0">Full Roster Matrix</h3>
+      <table class="sortable">
+        <thead>
+          <tr>
+            <th onclick="sortAllianceTable('teamNumber')">Team &#x21D5;</th>
+            <th onclick="sortAllianceTable('opr')">Pwr Rank &#x21D5;</th>
+            <th onclick="sortAllianceTable('avgScore')">Avg Pts &#x21D5;</th>
+            <th onclick="sortAllianceTable('avgAuto')">Auto Pts &#x21D5;</th>
+            <th onclick="sortAllianceTable('avgTele')">Tele Hubs &#x21D5;</th>
+            <th onclick="sortAllianceTable('avgFerry')">Ferry Vol &#x21D5;</th>
+            <th onclick="sortAllianceTable('climbRate')">Climb% &#x21D5;</th>
+            <th onclick="sortAllianceTable('avgIncap')">Incap (s) &#x21D5;</th>
+            <th onclick="sortAllianceTable('matches')">Matches &#x21D5;</th>
+          </tr>
+        </thead>
+        <tbody id="alliance-roster-body">
+          <tr><td colspan="9" style="text-align:center">Click 'Refresh Data' to load</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  
       <!-- SCAN -->
       <div id="scan-section" class="hidden">
         <div class="grid">

@@ -1038,6 +1038,32 @@ function setConnected(label, color){
   statusBadge.style.color = color;
 }
 
+function restoreSessionFromRefreshToken(){
+  if(!REFRESH_TOKEN || REFRESH_TOKEN === "offline-demo-token") return;
+
+  setConnected("RESTORING...", "#ff9500");
+  fetchTimeout(API_URL + "/auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: REFRESH_TOKEN
+  })
+  .then(function(res){
+    if(res.status !== 201) throw new Error("refresh failed (" + res.status + ")");
+    return res.json();
+  })
+  .then(function(data){
+    AUTH_TOKEN = data.accessToken || data.token;
+    REFRESH_TOKEN = data.refreshToken || REFRESH_TOKEN;
+    localStorage.setItem("@scanner_refresh", REFRESH_TOKEN);
+    setConnected("CONNECTED", "#4cd964");
+    log("Session restored.", "success");
+    showScanner();
+  })
+  .catch(function(){
+    setConnected("DISCONNECTED", "#666");
+  });
+}
+
 function showScanner(){
   loginSec.classList.add("hidden");
   navBtns.classList.remove("hidden");
@@ -3009,6 +3035,7 @@ if($("tba-api-key-input")){
   var runtimeApiKey = (window && window.TBA_API_KEY) ? String(window.TBA_API_KEY) : "";
   $("tba-api-key-input").value = localStorage.getItem("@scanner_tba_key") || runtimeApiKey;
 }
+restoreSessionFromRefreshToken();
 window.addEventListener("online", function(){
   log("Network restored. Trying to sync offline reports...", "info");
   flushPendingReports();

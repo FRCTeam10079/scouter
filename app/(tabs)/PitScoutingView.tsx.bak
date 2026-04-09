@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,10 +15,8 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  ToastAndroid
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import { useEffect, useState } from "react";
 
 const BACKEND_INDEXERS = ["VERTICAL", "SPINDEXER", "ROLLER", "BELT", "GRAVITY"];
 const BACKEND_SHOOTERS = [
@@ -252,12 +251,16 @@ export default function PitScoutingView({
     teamNumber: "",
     drivetrain: "Swerve",
     shooter: "Single Shooter",
+    hasDrumShooter: false,
     indexer: "VERTICAL",
     estimatedBps: "",
-    driverEvents: "",
+    driverExperience: "",
     hopperCapacity: "1",
-    weightLbs: "",
+    weight: "",
+    width: "",
+    length: "",
     autoRoutines: "",
+    canFerry: false,
     canPass: false,
     canDefend: false,
     canClimb: false,
@@ -290,6 +293,7 @@ export default function PitScoutingView({
 
     setBackendStatus("loading");
     setBackendMessage("Syncing with backend...");
+
     try {
       const res = await fetch(`${apiUrl}/get-pit-reports`, {
         method: "POST",
@@ -307,16 +311,11 @@ export default function PitScoutingView({
       const data = await res.json();
       setBackendReports((data || []).map(normalizeBackendPitReport));
       setBackendStatus("online");
-      const msg = `Synced ${Array.isArray(data) ? data.length : 0} reports from backend`;
-      setBackendMessage(msg);
-      if (Platform.OS === "android") ToastAndroid.show(msg, ToastAndroid.SHORT);
+      setBackendMessage(`Synced ${Array.isArray(data) ? data.length : 0} reports from backend`);
     } catch (error: any) {
       setBackendReports([]);
       setBackendStatus("offline");
-      const errMsg = error?.message || "Could not reach backend";
-      setBackendMessage(errMsg);
-      if (Platform.OS === "android") ToastAndroid.show(errMsg, ToastAndroid.LONG);
-      else Alert.alert("Backend Sync Error", errMsg);
+      setBackendMessage(error?.message || "Could not reach backend");
     }
   };
 
@@ -351,13 +350,18 @@ export default function PitScoutingView({
     setLoading(true);
 
     try {
-      const mappedClimbLevel = form.canClimb
-          ? String(Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0))
-          : "0";
       const localRecord = buildLocalPitRecord(
         {
           ...form,
-          climbLevel: mappedClimbLevel,
+          canPass: form.canFerry,
+          canDefend: form.canDefend,
+          canCrossBump: form.canCrossBump,
+          canCrossTrench: form.canCrossTrench,
+          climbLevel: form.canClimb
+            ? String(
+                Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0),
+              )
+            : "0",
         },
         form.photoBase64,
         form.photoUri,
@@ -365,17 +369,29 @@ export default function PitScoutingView({
         form.photoType,
       );
 
-      const mappedClimbLevel2 = form.canClimb
-          ? String(Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0))
-          : "0";
       const backendPayload = {
         ...form,
+        teamNumber: form.teamNumber,
+        eventCode: form.eventCode,
+        drivetrain: form.drivetrain,
+        shooter: form.shooter,
+        indexer: form.indexer,
         estimatedBps: normalizeNumericString(form.estimatedBps, ""),
-        climbLevel: mappedClimbLevel2,
+        hopperCapacity: form.hopperCapacity,
+        climbLevel: form.canClimb
+          ? String(
+              Math.max(0, ...form.climbLevels, parseInt(form.climbLevel || "0", 10) || 0),
+            )
+          : "0",
+        canPass: form.canFerry,
+        canDefend: form.canDefend,
+        canCrossBump: form.canCrossBump,
+        canCrossTrench: form.canCrossTrench,
+        driverEvents: form.driverExperience,
+        weightLbs: form.weight,
       };
 
       let backendSaved = false;
-      let errorDetails = "";
       if (token) {
         try {
           const res = await fetch(`${apiUrl}/pit-report`, {
@@ -385,7 +401,10 @@ export default function PitScoutingView({
             },
             body: buildPitFormData({
               ...backendPayload,
-              autoCollect: { outpost: false, depot: false },
+              autoCollect: {
+                outpost: false,
+                depot: false,
+              },
               autoMake: 0,
               autoClimb: "None",
             }),
@@ -394,12 +413,10 @@ export default function PitScoutingView({
           backendSaved = res.status === 201;
           if (!backendSaved) {
             const responseText = await res.text();
-            errorDetails = `Error ${res.status}: ${responseText}`;
             console.warn("Pit report backend save failed", res.status, responseText);
           }
-        } catch (backendError: any) {
+        } catch (backendError) {
           console.warn("Could not submit pit report to backend", backendError);
-          errorDetails = backendError.message;
         }
       }
 
@@ -409,7 +426,8 @@ export default function PitScoutingView({
       const idx = allReports.findIndex(
         (r: any) => r.teamNumber === localRecord.teamNumber,
       );
-      if (idx >= 0) allReports[idx] = localRecord; // overwrite
+      if (idx >= 0)
+        allReports[idx] = localRecord; // overwrite
       else allReports.unshift(localRecord);
 
       await AsyncStorage.setItem(
@@ -419,26 +437,30 @@ export default function PitScoutingView({
       setSavedReports(allReports);
       await loadBackendReports();
 
-      const title = backendSaved ? "Success" : "Saved Locally Use Wi-Fi Sync Later";
-      const msg = backendSaved
-        ? `Pit report for Team ${form.teamNumber} saved to backend and device.`
-        : `Pit report for Team ${form.teamNumber} saved on this device. Backend sync failed: ${errorDetails}`;
-      if (Platform.OS === "android") ToastAndroid.show(title + ": " + msg, ToastAndroid.LONG);
-      Alert.alert(title, msg);
+      Alert.alert(
+        backendSaved ? "Success" : "Saved Locally",
+        backendSaved
+          ? `Pit report for Team ${form.teamNumber} saved to backend and device.`
+          : `Pit report for Team ${form.teamNumber} saved on this device. Backend sync was not confirmed.`,
+      );
       setForm({
         eventCode: form.eventCode,
         teamNumber: "",
         estimatedBps: "",
-        driverEvents: "",
+        driverExperience: "",
         hopperCapacity: "1",
-        weightLbs: "",
+        weight: "",
+        width: "",
+        length: "",
         autoRoutines: "",
         notes: "",
         photoBase64: "",
         photoUri: "",
         photoName: "",
         photoType: "image/jpeg",
+        hasDrumShooter: false,
         canPass: false,
+        canFerry: false,
         canDefend: false,
         climbLevels: [],
         climbLevel: "0",
@@ -484,16 +506,14 @@ export default function PitScoutingView({
       r.teamNumber || "",
       r.drivetrain || "",
       r.shooter || "",
-      r.indexer || "",
+      r.hasDrumShooter ? "1" : "0",
       r.estimatedBps || "",
-      r.driverEvents || "",
-      r.weightLbs || "",
+      r.driverExperience || "",
+      r.weight || "",
+      r.width || "",
+      r.length || "",
       r.autoRoutines?.replace(/\|/g, "") || "",
-      r.canPass ? "1" : "0",
-      r.canDefend ? "1" : "0",
-      r.canCrossBump ? "1" : "0",
-      r.canCrossTrench ? "1" : "0",
-      r.hopperCapacity || "0",
+      r.canFerry ? "1" : "0",
       r.canClimb ? "1" : "0",
       r.climbLevels?.join(",") || "",
       r.notes?.replace(/\|/g, "") || "",
@@ -505,12 +525,12 @@ export default function PitScoutingView({
       <td>${escapeHtml(report.teamNumber || "N/A")}</td>
       <td>${escapeHtml(report.drivetrain || "N/A")}</td>
       <td>${escapeHtml(report.shooter || "N/A")}</td>
-      <td>${escapeHtml(report.indexer || "N/A")}</td>
+      <td>${report.hasDrumShooter ? "Yes" : "No"}</td>
       <td>${escapeHtml(report.estimatedBps || "?")}</td>
-      <td>${escapeHtml(report.driverEvents || "?")}</td>
-      <td>${report.canPass ? "Yes" : "No"}</td>
+      <td>${escapeHtml(report.driverExperience || "?")}</td>
+      <td>${report.canFerry ? "Yes" : "No"}</td>
       <td>${escapeHtml(climbLevelLabel(report))}</td>
-      <td>${escapeHtml(report.weightLbs || "?")}</td>
+      <td>${escapeHtml(report.weight || "?")} / ${escapeHtml(report.width || "?")} / ${escapeHtml(report.length || "?")}</td>
       <td>${escapeHtml(report.autoRoutines || "-")}</td>
       <td>${escapeHtml(report.notes || "-")}</td>
     </tr>
@@ -524,16 +544,16 @@ export default function PitScoutingView({
       <div class="grid">
         <div class="box"><div class="label">Drivetrain</div><div class="value">${escapeHtml(report.drivetrain || "N/A")}</div></div>
         <div class="box"><div class="label">Shooter</div><div class="value">${escapeHtml(report.shooter || "N/A")}</div></div>
-        <div class="box"><div class="label">Indexer</div><div class="value">${escapeHtml(report.indexer || "N/A")}</div></div>
+        <div class="box"><div class="label">Drum Shooter</div><div class="value">${report.hasDrumShooter ? "Yes" : "No"}</div></div>
         <div class="box"><div class="label">Estimated BPS</div><div class="value">${escapeHtml(report.estimatedBps || "?")}</div></div>
-        <div class="box"><div class="label">Driver Events</div><div class="value">${escapeHtml(report.driverEvents || "?")}</div></div>
-        <div class="box"><div class="label">Can Pass</div><div class="value">${report.canPass ? "Yes" : "No"}</div></div>
+        <div class="box"><div class="label">Driver Experience</div><div class="value">${escapeHtml(report.driverExperience || "?")} events</div></div>
+        <div class="box"><div class="label">Can Ferry</div><div class="value">${report.canFerry ? "Yes" : "No"}</div></div>
         <div class="box"><div class="label">Climb</div><div class="value">${escapeHtml(climbLevelLabel(report))}</div></div>
       </div>
 
       <div class="box full-width">
         <div class="label">Physical Specs</div>
-        <div class="value">Weight: ${escapeHtml(report.weightLbs || "?")} lbs</div>
+        <div class="value">Weight: ${escapeHtml(report.weight || "?")} lbs | Width: ${escapeHtml(report.width || "?")} in | Length: ${escapeHtml(report.length || "?")} in</div>
       </div>
 
       <div class="box full-width">
@@ -591,7 +611,7 @@ export default function PitScoutingView({
           <h1>Pit Scouting Report</h1>
           <div class="subtitle">Teams: ${reportsToPrint.map((r) => escapeHtml(r.teamNumber || "")).join(", ")}</div>
           <div class="chip">${printLayout === "compact" ? "Compact View" : "Detailed View"}</div>
-          ${printLayout === "compact" ? `<table><thead><tr><th>Team</th><th>Drivetrain</th><th>Shooter</th><th>Indexer</th><th>Est BPS</th><th>Driver Evts</th><th>Pass</th><th>Climb</th><th>Weight</th><th>Auto</th><th>Notes</th></tr></thead><tbody>${compactRows}</tbody></table>` : detailedCards}
+          ${printLayout === "compact" ? `<table><thead><tr><th>Team</th><th>Drivetrain</th><th>Shooter</th><th>Drum</th><th>Est BPS</th><th>Driver Exp</th><th>Can Ferry</th><th>Climb</th><th>Wgt/W/L</th><th>Auto</th><th>Notes</th></tr></thead><tbody>${compactRows}</tbody></table>` : detailedCards}
         </body>
       </html>`;
 
@@ -632,7 +652,7 @@ export default function PitScoutingView({
     const teamSet = new Set(selectedTeams);
     if (teamSet.has(normalizedTeam)) teamSet.delete(normalizedTeam);
     else teamSet.add(normalizedTeam);
-    syncTeamInput(Array.from(teamSet) as string[]);
+    syncTeamInput(Array.from(teamSet));
   };
 
   const onTeamInputChange = (value: string) => {
@@ -642,7 +662,7 @@ export default function PitScoutingView({
 
   const selectedReports =
     selectedTeams.length > 0
-      ? savedReports.filter((report: any) =>
+      ? savedReports.filter((report) =>
           selectedTeams.includes(report.teamNumber),
         )
       : savedReports;
@@ -800,7 +820,7 @@ export default function PitScoutingView({
                 No backend pit reports loaded yet.
               </Text>
             ) : (
-              backendReports.map((report: any) => (
+              backendReports.map((report) => (
                 <View key={report.id} style={styles.backendListItem}>
                   <Text style={styles.backendListItemTitle}>
                     Team {report.teamNumber} · {report.eventCode || "-----"}
@@ -818,7 +838,7 @@ export default function PitScoutingView({
           {savedReports.length === 0 && (
             <Text style={{ color: "#888" }}>No reports saved yet.</Text>
           )}
-          {savedReports.map((r: any, i: number) => (
+          {savedReports.map((r, i) => (
             <View
               key={i}
               style={{
@@ -1036,11 +1056,25 @@ export default function PitScoutingView({
           </View>
 
           <TouchableOpacity
-            style={[styles.toggleBtn, form.canPass && styles.activeGreen]}
-            onPress={() => setForm({ ...form, canPass: !form.canPass })}
+            style={[
+              styles.toggleBtn,
+              form.hasDrumShooter && styles.activeGreen,
+            ]}
+            onPress={() =>
+              setForm({ ...form, hasDrumShooter: !form.hasDrumShooter })
+            }
           >
             <Text style={styles.toggleText}>
-              Can they Pass? {form.canPass ? "YES" : "NO"}
+              Do they have a Drum Shooter? {form.hasDrumShooter ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canFerry && styles.activeGreen]}
+            onPress={() => setForm({ ...form, canFerry: !form.canFerry })}
+          >
+            <Text style={styles.toggleText}>
+              Can they Pass? {form.canFerry ? "YES" : "NO"}
             </Text>
           </TouchableOpacity>
 
@@ -1085,14 +1119,14 @@ export default function PitScoutingView({
             onChangeText={(t) => setForm({ ...form, estimatedBps: t })}
           />
 
-          <Text style={styles.label}>Driver Events</Text>
+          <Text style={styles.label}>Driver Experience (Events Gone To)</Text>
           <TextInput
             style={styles.input}
             keyboardType="numeric"
             placeholder="e.g. 4"
             placeholderTextColor="#666"
-            value={form.driverEvents}
-            onChangeText={(t) => setForm({ ...form, driverEvents: t })}
+            value={form.driverExperience}
+            onChangeText={(t) => setForm({ ...form, driverExperience: t })}
           />
 
           <Text style={styles.label}>Physical Specs</Text>
@@ -1102,8 +1136,24 @@ export default function PitScoutingView({
               placeholder="Weight (lbs)"
               placeholderTextColor="#666"
               keyboardType="numeric"
-              value={form.weightLbs}
-              onChangeText={(t) => setForm({ ...form, weightLbs: t })}
+              value={form.weight}
+              onChangeText={(t) => setForm({ ...form, weight: t })}
+            />
+            <TextInput
+              style={[styles.input, { flex: 1 }]}
+              placeholder="Width (in)"
+              placeholderTextColor="#666"
+              keyboardType="numeric"
+              value={form.width}
+              onChangeText={(t) => setForm({ ...form, width: t })}
+            />
+            <TextInput
+              style={[styles.input, { flex: 1 }]}
+              placeholder="Length (in)"
+              placeholderTextColor="#666"
+              keyboardType="numeric"
+              value={form.length}
+              onChangeText={(t) => setForm({ ...form, length: t })}
             />
           </View>
 
@@ -1123,7 +1173,14 @@ export default function PitScoutingView({
             </Text>
           </TouchableOpacity>
 
-          
+          <TouchableOpacity
+            style={[styles.toggleBtn, form.canFerry && styles.activeGreen]}
+            onPress={() => setForm({ ...form, canFerry: !form.canFerry })}
+          >
+            <Text style={styles.toggleText}>
+              Are they able to Ferry? {form.canFerry ? "YES" : "NO"}
+            </Text>
+          </TouchableOpacity>
 
           {form.canClimb && (
             <View style={{ marginTop: 10 }}>
@@ -1139,7 +1196,7 @@ export default function PitScoutingView({
                         setForm({
                           ...form,
                           climbLevels: isActive
-                            ? form.climbLevels.filter((l: number) => l !== level)
+                            ? form.climbLevels.filter((l) => l !== level)
                             : [...(form.climbLevels || []), level],
                         });
                       }}

@@ -259,3 +259,11 @@ tr:hover {
     color: #0066cc;
   }
 }
+
+/* Alliance Selection CSS */
+.alliance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+.alliance-card { background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #444; }
+.dnp-flag { color: #ff453a; font-weight: bold; font-size: 11px; margin-top: 4px; display: inline-block; }
+.good-flag { color: #34d399; font-weight: bold; font-size: 11px; margin-top: 4px; display: inline-block; }
+.sortable th { cursor: pointer; user-select: none; }
+.sortable th:hover { background: #333; }

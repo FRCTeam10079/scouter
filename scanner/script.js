@@ -721,8 +721,14 @@ function buildScanKey(rawChunk) {
 function switchTab(tab) {
   scanSec.classList.add("hidden");
   printSec.classList.add("hidden");
+  const allianceSec = $("alliance-section");
+  if (allianceSec) allianceSec.classList.add("hidden");
+
   $("nav-scan-btn").classList.add("secondary");
   $("nav-print-btn").classList.add("secondary");
+  const allianceBtn = $("nav-alliance-btn");
+  if (allianceBtn) allianceBtn.classList.add("secondary");
+
   if (tab === "scan") {
     scanSec.classList.remove("hidden");
     normalizeCameraViewport();
@@ -730,6 +736,12 @@ function switchTab(tab) {
     ensureQrLib(() => {
       log("QR scanner ready.", "success");
     });
+  } else if (tab === "alliance") {
+    if (allianceSec) allianceSec.classList.remove("hidden");
+    if (allianceBtn) allianceBtn.classList.remove("secondary");
+    if (cameraOn) toggleCamera();
+    if (typeof loadAllianceData === 'function' && !window.allianceDataLoaded) loadAllianceData();
+    return;
   } else {
     printSec.classList.remove("hidden");
     $("nav-print-btn").classList.remove("secondary");
@@ -1307,6 +1319,591 @@ function processSingleMatch(str) {
       return { match: p[1], team: p[2] };
     });
 }
+
+// ─── STATBOTICS INTEGRATION ──────────────────────────────────────────────────
+function fetchStatboticsPrediction() {
+  var year = $("sb-year-input").value.trim();
+  var eventCode = $("sb-event-input").value.trim().toLowerCase();
+  var matchNum = $("sb-match-input").value.trim();
+  var resultDiv = $("sb-pred-result");
+
+  if (!year || !eventCode || !matchNum) { 
+    alert("Enter Year, Event (e.g., wasno), and Match # to predict."); 
+    return; 
+  }
+
+  var matchKey = year + eventCode + "_qm" + matchNum;
+  resultDiv.style.display = "block";
+
+  if (!navigator.onLine) {
+    resultDiv.innerHTML = "<span class='dnp-flag'>Offline. Cannot fetch predictions.</span>";
+    return;
+  }
+
+  resultDiv.innerHTML = "Fetching...";
+  fetch("https://api.statbotics.io/v3/match/" + matchKey)
+    .then(r => {
+      if (!r.ok) throw new Error("Match not found or API error.");
+      return r.json();
+    })
+    .then(data => {
+      var rOdds = (data.pred.red_win_prob * 100).toFixed(1);
+      var bOdds = ((1 - data.pred.red_win_prob) * 100).toFixed(1);
+
+      var redTeams = data.alliances.red.team_keys.join(", ");
+      var blueTeams = data.alliances.blue.team_keys.join(", ");
+
+      var html = `
+        <div style="font-size:12px; color:#888; text-align:center; margin-bottom:8px">Match ${matchNum} Teams</div>
+        <div style="display:flex; justify-content: space-between; margin-top: 10px; font-weight:bold;">
+          <div style="color:var(--rd); text-align:left;">
+            <div style="font-size:16px; margin-bottom:4px; color:#ff453a;">${redTeams}</div>
+            RED<br>Score: ${data.pred.red_score.toFixed(1)}<br>Win: ${rOdds}%
+          </div>
+          <div style="color:var(--bu); text-align:right;">
+            <div style="font-size:16px; margin-bottom:4px; color:#0a84ff;">${blueTeams}</div>
+            BLUE<br>Score: ${data.pred.blue_score.toFixed(1)}<br>Win: ${bOdds}%
+          </div>
+        </div>
+      `;
+      resultDiv.innerHTML = html;
+    })
+    .catch(e => {
+      resultDiv.innerHTML = "<span class='dnp-flag'>Error: " + e.message + "</span>";
+    });
+}
+
+function fetchStatboticsAllianceData() {
+  $("alliance-roster-body").innerHTML = "<tr><td colspan='9' style='text-align:center'>Fetching Statbotics EPA...</td></tr>";
+
+  var year = $("sb-year-input").value.trim();
+  var eventCode = $("sb-event-input").value.trim().toLowerCase();
+
+  // Try to construct using our inputs, fallback to prompt
+  var eventKey = "";
+  if (year && eventCode) {
+    eventKey = year + eventCode;
+  } else {
+    eventKey = prompt("Enter event key (e.g., 2024wasno) for Statbotics data:", "2024wasno");
+    if(eventKey) {
+      var yr = eventKey.substring(0,4);
+      var evt = eventKey.substring(4);
+      if(!isNaN(yr)) {
+        $("sb-year-input").value = yr;
+        $("sb-event-input").value = evt;
+      } else {
+        $("sb-event-input").value = eventKey;
+      }
+    }
+  }
+
+  if (!eventKey) {
+    $("alliance-datasource-statbotics").checked = false;
+    return loadAllianceData(); // fallback
+  }
+
+  fetch("https://api.statbotics.io/v3/team_events?event=" + eventKey)
+    .then(r => r.json())
+    .then(data => {
+      if (data.length === 0) throw new Error("No data for event " + eventKey);
+
+      var tableHtml = "";
+      // In Statbotics v3, team_events usually has epa stats.
+      // We map it to our roster format.
+      var mappedRoster = data.map(te => {
+        var breakdown = te.epa ? te.epa.breakdown : null;
+        return {
+          team: te.team,
+          matches: te.count || 0,
+          opr: breakdown ? breakdown.total_points : 0,
+          autoAvg: breakdown ? breakdown.auto_points : 0,
+          teleAvg: breakdown ? breakdown.teleop_points : 0,
+          ferryAvg: breakdown ? breakdown.endgame_points : 0,
+          incapAvg: 0 // statbotics doesn't have incap easily
+        };
+      });
+
+      mappedRoster.sort((a,b) => b.opr - a.opr);
+      window.currentAllianceRoster = mappedRoster;
+
+      mappedRoster.forEach(function(r, idx){
+        tableHtml += "<tr class='team-row' data-team='"+r.team+"'>" +
+          "<td>"+(idx+1)+"</td>" +
+          "<td><strong>"+r.team+"</strong></td>" +
+          "<td>"+r.opr.toFixed(1)+"</td>" + // using EPA as OPR
+          "<td>"+r.autoAvg.toFixed(1)+"</td>" + // auto EPA
+          "<td>"+r.teleAvg.toFixed(1)+"</td>" + // tele EPA
+          "<td>"+r.ferryAvg.toFixed(1)+"</td>" + // endgame EPA
+          "<td>N/A</td>" +
+          "<td>N/A</td>" +
+          "<td>-</td>" +
+        "</tr>";
+      });
+      $("alliance-roster-body").innerHTML = tableHtml;
+
+      // Select the top team by default
+      if(mappedRoster.length > 0) {
+        renderTeamDeepDive(mappedRoster[0].team);
+        renderPredictedPickList(); // Update pick list
+      }
+    })
+    .catch(e => {
+      alert("Error fetching Statbotics data: " + e.message + ". Falling back to local scouting data.");
+      $("alliance-datasource-statbotics").checked = false;
+      loadAllianceData();
+    });
+}
+
+// ─── ALLIANCE SELECTION ──────────────────────────────────────────────────────
+function loadAllianceData() {
+  var statToggle = $("alliance-datasource-statbotics");
+  var useStatbotics = statToggle && statToggle.checked;
+  $("statbotics-pred-card").classList.toggle("hidden", !useStatbotics);
+
+  if (useStatbotics) {
+    if (!navigator.onLine) {
+      alert("Warning: No internet connection detected. Falling back to offline scouting data.");
+      statToggle.checked = false;
+      return loadAllianceData();
+    }
+    fetchStatboticsAllianceData();
+    return;
+  }
+
+  if(!AUTH_TOKEN) { alert("Connect to backend first."); return; }
+  $("alliance-roster-body").innerHTML = "<tr><td colspan='9' style='text-align:center'>Loading full event data...</td></tr>";
+
+  fetchAllFullReports().then(function(all){
+    var teamsMap = {};
+    all.forEach(function(r) {
+      if(!r.teamNumber) return;
+      if(!teamsMap[r.teamNumber]) teamsMap[r.teamNumber] = [];
+      teamsMap[r.teamNumber].push(r);
+    });
+
+    var roster = [];
+    Object.keys(teamsMap).forEach(function(teamNum) {
+      var stats = computeStatsFromMatches(teamsMap[teamNum]);
+      if (stats && stats.matchesPlayed > 0) {
+        var pwr = (stats.avgAutoHub * 2.5) + (stats.avgTeleHub * 1) + (stats.avgEndPts * 0.8) + (stats.avgFerry * 0.5);
+        pwr -= (stats.avgIncap * 0.5);
+
+        var dnpReasons = [];
+        var goodFlags = [];
+        if (stats.deadPct !== "0%") dnpReasons.push("Dead in " + stats.deadPct + " of matches");
+        if (stats.avgIncap > 10) dnpReasons.push("Avg " + stats.avgIncap + "s incapacitation");
+        if (stats.climbFails > 0) dnpReasons.push(stats.climbFails + " climb fails");
+
+        if (stats.avgIncap === 0 && stats.climbFails === 0 && stats.matchesPlayed > 3) goodFlags.push("High Reliability");
+        if (stats.maxAutoHub >= 5) goodFlags.push("Strong Auto");
+        if (stats.avgFerry > 10) goodFlags.push("Ferry Specialist");
+
+        roster.push({
+          teamNumber: parseInt(teamNum, 10),
+          opr: pwr,
+          avgScore: stats.avgScore,
+          avgAuto: stats.avgAutoHub,
+          avgTele: stats.avgTeleHub,
+          avgFerry: stats.avgFerry,
+          climbRate: stats.climbAttempts > 0 ? Math.round((stats.climbSuccesses / stats.matchesPlayed)*100) : 0,
+          avgIncap: stats.avgIncap,
+          matches: stats.matchesPlayed,
+          dnpReasons: dnpReasons,
+          goodFlags: goodFlags,
+          rawStats: stats,
+          rawMatches: teamsMap[teamNum]
+        });
+      }
+    });
+
+    window.currentAllianceRoster = roster;
+    window.allianceDataLoaded = true;
+
+    renderAllianceDashboard();
+  }).catch(function(e){ log("Alliance fetch error: " + e.message, "error"); });
+}
+
+function renderAllianceDashboard() {
+  var roster = window.currentAllianceRoster.slice();
+
+  roster.sort(function(a,b){ return b.opr - a.opr; });
+  var recHtml = roster.filter(function(t){ return t.dnpReasons.length <= 1; }).slice(0, 10).map(function(t) {
+    var flags = t.goodFlags.map(function(f){ return "<span class='good-flag'>&#x2713; "+f+"</span>"; }).join(" ");
+    return "<div style='padding:8px 0;border-bottom:1px solid #333;display:flex;justify-content:space-between'><span><b>" + t.teamNumber + "</b> (Pwr: " + t.opr.toFixed(1) + ")</span> <span>" + flags + "</span></div>";
+  }).join("");
+  $("alliance-recommended-list").innerHTML = recHtml || "<div style='color:#666;padding:10px 0'>Not enough data</div>";
+
+  var dnpRoster = window.currentAllianceRoster.filter(function(t){ return t.dnpReasons.length > 0 || t.avgIncap > 5; });
+  dnpRoster.sort(function(a,b){ return b.avgIncap - a.avgIncap; });
+  var dnpHtml = dnpRoster.map(function(t) {
+    var flags = t.dnpReasons.map(function(f){ return "<span class='dnp-flag'>&#x26A0; "+f+"</span>"; }).join(" ");
+    return "<div style='padding:8px 0;border-bottom:1px solid #333'><b>" + t.teamNumber + "</b><br>" + flags + "</div>";
+  }).join("");
+  $("alliance-dnp-list").innerHTML = dnpHtml || "<div style='color:#666;padding:10px 0'>No teams flagged for DNP.</div>";
+
+  renderPredictedPickList();
+
+  sortAllianceTable(window.currentAllianceSort.col, true);
+}
+
+function renderPredictedPickList() {
+  if (!window.currentAllianceRoster || window.currentAllianceRoster.length === 0) return;
+
+  var useStatbotics = $("alliance-datasource-statbotics") && $("alliance-datasource-statbotics").checked;
+  var isStat = useStatbotics ? "Statbotics EPA" : "Local Scouting Data";
+  var subtitle = $("predicted-list-subtitle");
+  if (subtitle) subtitle.innerHTML = "Based on calculated Power Rank (" + isStat + ")";
+
+  // Make a shallow copy and sort by OPR/EPA descending
+  var sortedRoster = window.currentAllianceRoster.slice().sort(function(a,b) {
+    return b.opr - a.opr;
+  });
+
+  // Depending on if it's statbotics or local, the team key varies. 
+  // Try '.team' first, fallback to '.teamNumber'
+  var getTeamStrOuter = function(t){ 
+    if(!t) return "<i style='color:#666'>TBD</i>";
+    var tNum = typeof t.team !== 'undefined' ? t.team : t.teamNumber; 
+    return "<b>" + tNum + "</b> <span style='color:#aaa;font-size:11px'>(" + t.opr.toFixed(1) + ")</span>";
+  };
+
+  var html = "";
+  for (var i = 0; i < 8; i++) {
+    var cap = sortedRoster[i];
+    var pick1 = sortedRoster[8 + i];
+    var pick2 = sortedRoster[23 - i]; // Snake draft format for the 2nd pick
+
+    html += "<div style='background:#1a1a1a; border: 1px solid #333; padding:10px; border-radius:6px;'>" +
+              "<div style='color:#a855f7; font-weight:bold; margin-bottom:5px; border-bottom:1px solid #333; padding-bottom:3px;'>Alliance " + (i+1) + "</div>" +
+              "<div style='display:flex; justify-content:space-between; margin-bottom:4px;'><span>Captain:</span> <span>" + getTeamStrOuter(cap) + "</span></div>" +
+              "<div style='display:flex; justify-content:space-between; margin-bottom:4px;'><span>1st Pick:</span> <span>" + getTeamStrOuter(pick1) + "</span></div>" +
+              "<div style='display:flex; justify-content:space-between;'><span>2nd Pick:</span> <span>" + getTeamStrOuter(pick2) + "</span></div>" +
+            "</div>";
+  }
+
+  var grid = $("predicted-alliances-grid");
+  if (grid) grid.innerHTML = html;
+}
+
+function sortAllianceTable(col, forceRetainDirection) {
+  if (!forceRetainDirection) {
+    if (window.currentAllianceSort.col === col) {
+      window.currentAllianceSort.asc = !window.currentAllianceSort.asc;
+    } else {
+      window.currentAllianceSort.col = col;
+      window.currentAllianceSort.asc = false;
+    }
+  }
+
+  var colKey = window.currentAllianceSort.col;
+  var asc = window.currentAllianceSort.asc;
+
+  var roster = window.currentAllianceRoster.slice();
+  roster.sort(function(a, b) {
+    var valA = a[colKey];
+    var valB = b[colKey];
+    if (valA < valB) return asc ? -1 : 1;
+    if (valA > valB) return asc ? 1 : -1;
+    return 0;
+  });
+
+  var html = roster.map(function(t) {
+    var rowBg = t.dnpReasons.length > 1 ? "background:rgba(255,69,58,0.15)" : "";
+    return "<tr style='"+rowBg+"'>" +
+      "<td><b>"+t.teamNumber+"</b></td>" +
+      "<td>"+t.opr.toFixed(1)+"</td>" +
+      "<td>"+t.avgScore.toFixed(1)+"</td>" +
+      "<td>"+t.avgAuto.toFixed(1)+"</td>" +
+      "<td>"+t.avgTele.toFixed(1)+"</td>" +
+      "<td>"+t.avgFerry.toFixed(1)+"</td>" +
+      "<td>"+t.climbRate+"%</td>" +
+      "<td>"+t.avgIncap.toFixed(1)+"</td>" +
+      "<td>"+t.matches+"</td>" +
+    "</tr>";
+  }).join("");
+  $("alliance-roster-body").innerHTML = html;
+}
+
+function renderTeamDeepDive() {
+  var teamInput = parseInt($("alliance-search-input").value, 10);
+  if(!teamInput || isNaN(teamInput)) return;
+
+  var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
+  var panel = $("alliance-deep-dive-content");
+  if(!tm) {
+    panel.style.display = "block";
+    panel.innerHTML = "<div style='color:#ff453a'>Team " + teamInput + " not found. Ensure you fetched data.</div>";
+    return;
+  }
+
+  var issues = "";
+  if(tm.dnpReasons.length > 0) issues = "<div style='color:#ff453a;margin-top:10px;padding:10px;background:rgba(255,69,58,0.1);border-radius:6px'><b>Flags:</b> " + tm.dnpReasons.join(" | ") + "</div>";
+  else issues = "<div style='color:#34d399;margin-top:10px;padding:10px;background:rgba(52,211,153,0.1);border-radius:6px'><b>Flags:</b> None (Solid Performer)</div>";
+
+  panel.style.display = "block";
+  panel.innerHTML = 
+    "<h4 style='margin:0 0 10px;color:#0a84ff;font-size:18px'>Team " + tm.teamNumber + " Overview</h4>" +
+    "<div style='display:grid;grid-template-columns:1fr 1fr;gap:20px;font-size:14px'>" +
+      "<div><b>Power Rank:</b> "+tm.opr.toFixed(1)+"</div>" +
+      "<div><b>Avg Score:</b> "+tm.avgScore.toFixed(1)+" (High: "+tm.rawStats.maxScore+")</div>" +
+      "<div><b>Matches Played:</b> "+tm.matches+"</div>" +
+      "<div><b>Ferry Avg:</b> "+tm.avgFerry.toFixed(1)+"</div>" +
+    "</div>" + issues +
+
+    "<div style='margin-top:25px; display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid #444; padding-bottom:5px;'>" +
+      "<h5 style='margin:0'>Match Performance Timeline</h5>" +
+      "<select id='alliance-metric-select' style='width:auto; padding:5px 10px; background:#2c2c2c; color:#fff; border:1px solid #444; border-radius:4px; font-size:12px; margin:0;' onchange='updateTeamTimeline()'>" +
+        "<option value='totalPts'>Total Points</option>" +
+        "<option value='autoHubs'>Auto Hubs</option>" +
+        "<option value='teleHubs'>Teleop Hubs</option>" +
+        "<option value='ferry'>Ferry Volume</option>" +
+        "<option value='incap'>Seconds Dead (Incap)</option>" +
+      "</select>" +
+    "</div>" +
+    "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>";
+
+  updateTeamTimeline();
+}
+
+function updateTeamTimeline() {
+  var teamInput = parseInt($("alliance-search-input").value, 10);
+  var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
+  if(!tm) return;
+
+  var metric = $("alliance-metric-select").value;
+  var sortedMatches = tm.rawMatches.slice().sort(function(a,b){ return (a.matchNumber||0) - (b.matchNumber||0); });
+
+  var maxVal = 1;
+  var graphData = sortedMatches.map(function(m) {
+    var aHubs = parseInt((m.auto && m.auto.hubScores)||0, 10);
+    var tHubs = parseInt((m.teleop && m.teleop.hubScores)||0, 10);
+    var p = parsePackedNotes(m.notes);
+    var ep = 0;
+    if (m.notes && m.notes.includes("Level 3")) ep = 3;
+    else if (m.notes && m.notes.includes("Level 2")) ep = 2;
+    else if (m.notes && m.notes.includes("Level 1")) ep = 1;
+    var fVol = parseInt((m.teleop && m.teleop.passes)||0, 10) || parseInt(p.ferry||0, 10);
+    var incapSec = parseInt(m.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+
+    var autoPts = aHubs * 2;
+    var totalPts = autoPts + tHubs + (ep * 10);
+
+    var val = 0;
+    var color = "#0a84ff";
+    var label = "";
+
+    if(metric === "totalPts") { val = totalPts; label = totalPts; color = "#0a84ff"; }
+    else if(metric === "autoHubs") { val = aHubs; label = aHubs; color = "#8a2be2"; }
+    else if(metric === "teleHubs") { val = tHubs; label = tHubs; color = "#22c55e"; }
+    else if(metric === "ferry") { val = fVol; label = fVol; color = "#ff9500"; }
+    else if(metric === "incap") { 
+      val = incapSec; label = incapSec+"s"; 
+      color = incapSec > 10 ? "#ff453a" : (incapSec > 0 ? "#ff9500" : "#34d399"); 
+    }
+
+    if(metric !== "incap" && val > maxVal) maxVal = val;
+
+    return { matchNum: m.matchNumber||"?", val: val, label: label, color: color };
+  });
+
+  if (metric === "incap") maxVal = 150; 
+  if (maxVal === 0) maxVal = 1; // Prevent div by 0
+
+  var barsHtml = graphData.map(function(d) {
+    var pct = Math.max(2, Math.min(100, (d.val / maxVal) * 100));
+    return "<div style='display:flex;flex-direction:column;align-items:center;margin-right:15px'>" +
+      "<div style='height:120px;display:flex;align-items:flex-end;width:30px;background:#333;border-radius:4px'>" +
+        "<div style='width:100%;height:"+pct+"%;background:"+d.color+";border-radius:4px;position:relative'>" +
+          "<span style='position:absolute;top:-18px;left:0;right:0;text-align:center;font-size:10px;font-weight:bold'>"+d.label+"</span>" +
+        "</div>" +
+      "</div>" +
+      "<div style='font-size:11px;margin-top:6px;color:#aaa'>Q"+d.matchNum+"</div>" +
+    "</div>";
+  }).join("");
+
+  $("team-timeline-graph").innerHTML = barsHtml || "<span style='color:#666'>No data</span>";
+}
+
+function printAllianceSheet() {
+  if(!window.currentAllianceRoster || window.currentAllianceRoster.length === 0) {
+    alert("Fetch data first by opening the Alliance Sel. tab.");
+    return;
+  }
+
+  var roster = window.currentAllianceRoster.slice();
+  roster.sort(function(a,b){ return b.opr - a.opr; });
+
+  var top24 = roster.slice(0, 24);
+
+  var rowsHtml = top24.map(function(t, i) {
+    var flags = t.dnpReasons.length > 0 ? ("<span style='color:#b91c1c;font-size:11px;font-weight:bold;margin-right:8px'>" + t.dnpReasons.join(", ") + "</span>") : "";
+    var gFlags = t.goodFlags.length > 0 ? ("<span style='color:#15803d;font-size:11px;font-weight:bold'>" + t.goodFlags.join(", ") + "</span>") : "";
+
+    return "<tr>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center'>" + (i+1) + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;font-size:16px;font-weight:bold'>" + t.teamNumber + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center;font-weight:bold'>" + t.opr.toFixed(1) + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.avgAuto.toFixed(1) + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.avgFerry.toFixed(1) + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.climbRate + "%</td>" +
+      "<td style='border:1px solid #000;padding:6px'>" + flags + gFlags + "</td>" +
+    "</tr>";
+  }).join("");
+
+  var html = 
+    "<h1 style='text-align:center;margin-bottom:5px'>Alliance Strategy Cheat Sheet</h1>" +
+    "<p style='text-align:center;font-size:12px;margin-top:0'>Top 24 Teams ordered by Power Rank. Pick strategically.</p>" +
+    "<table style='width:100%;border-collapse:collapse;margin-top:15px'>" +
+      "<thead><tr style='background:#f0f0f0'>" +
+        "<th style='border:1px solid #000;padding:6px;width:40px'>Rank</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>Team</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>Power</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>Avg Auto</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>Avg Ferry</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>Climb %</th>" +
+        "<th style='border:1px solid #000;padding:6px'>Notable Flags</th>" +
+      "</tr></thead>" +
+      "<tbody>" + rowsHtml + "</tbody>" +
+    "</table>";
+
+  openPrint(html, "@media print{@page{size:portrait}} body{color:#000;font-size:12px}");
+}
+
+// ─── EVENT MANAGEMENT ────────────────────────────────────────────────────────
+function renderEventUI() {
+  if($("active-event-input")) $("active-event-input").value = activeEventName;
+  var container = $("event-filters-container");
+  if(!container) return;
+
+  var uniqueEvents = {};
+  knownEvents.forEach(function(ev){ uniqueEvents[ev] = true; });
+  uniqueEvents[activeEventName] = true;
+  Object.keys(eventTags).forEach(function(k){ uniqueEvents[eventTags[k]] = true; });
+
+  // Keep known events strictly in sync
+  knownEvents = Object.keys(uniqueEvents);
+  localStorage.setItem("@scanner_known_events", JSON.stringify(knownEvents));
+
+  var html = "";
+  knownEvents.sort().forEach(function(ev){
+    if(!ev) return;
+    var checked = selectedFilterEvents.indexOf(ev) !== -1 ? "checked" : "";
+    html += "<label style='background:#333;padding:8px 12px;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:6px;border:1px solid "+(checked?"#0a84ff":"#444")+"'><input type='checkbox' value='"+ev+"' onchange='toggleEventFilter(this)' "+checked+"> <b>" + ev + "</b></label>";
+  });
+  if(selectedFilterEvents.length === 0) {
+    html += "<div style='color:#ff9500;margin-top:4px;font-style:italic'>No events selected. System is currently analyzing ALL events.</div>";
+  }
+  container.innerHTML = html;
+}
+
+function updateActiveEvent() {
+  var val = ($("active-event-input").value || "").trim();
+  if(val && val !== activeEventName) {
+    activeEventName = val;
+    localStorage.setItem("@scanner_active_event", activeEventName);
+
+    var needsSave = false;
+    // Auto-migrate any placeholder "Default Event" tags safely
+    Object.keys(eventTags).forEach(function(k){
+      if(eventTags[k] === "Default Event") {
+        eventTags[k] = activeEventName;
+        needsSave = true;
+      }
+    });
+
+    var filterIdx = selectedFilterEvents.indexOf("Default Event");
+    if(filterIdx !== -1) {
+      selectedFilterEvents[filterIdx] = activeEventName;
+      localStorage.setItem("@scanner_filter_events", JSON.stringify(selectedFilterEvents));
+    }
+
+    if(needsSave){
+      localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    }
+
+    renderEventUI();
+    log("Active event updated to: " + activeEventName, "info");
+    fetchData(); // Instantly refresh the Recent Matches table!
+  }
+}
+
+function createNewEventBucket() {
+  var eName = prompt("Enter a name for the new Event Bucket:");
+  if (!eName || !eName.trim()) return;
+  eName = eName.trim();
+  if (knownEvents.indexOf(eName) === -1) {
+    knownEvents.push(eName);
+    localStorage.setItem("@scanner_known_events", JSON.stringify(knownEvents));
+    renderEventUI();
+  } else {
+    alert("Event bucket already exists: " + eName);
+  }
+}
+
+function toggleEventFilter(cb) {
+  var val = cb.value;
+  if(cb.checked) {
+    if(selectedFilterEvents.indexOf(val) === -1) selectedFilterEvents.push(val);
+  } else {
+    var idx = selectedFilterEvents.indexOf(val);
+    if(idx !== -1) selectedFilterEvents.splice(idx, 1);
+  }
+  localStorage.setItem("@scanner_filter_events", JSON.stringify(selectedFilterEvents));
+  renderEventUI();
+}
+
+function tagAllVisibleWithActiveEvent() {
+  var w = prompt("Type 'TAG' to assign ALL currently downloaded matches in the database to the Active Event ("+activeEventName+").");
+  if (w !== 'TAG') return log("Tagging cancelled.", "error");
+
+  if(!AUTH_TOKEN) return log("Must connect first.", "error");
+
+  fetchReportList(2000, 0)
+  .then(function(data){
+    var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+    var visibleData = data.filter(function(d){ return (d.id || Infinity) > hideId; });
+    var count = 0;
+    visibleData.forEach(function(r){
+      if(r.id && eventTags[r.id] !== activeEventName){
+        eventTags[r.id] = activeEventName;
+        count++;
+      }
+    });
+    localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    renderEventUI();
+    log("Successfully grouped " + count + " available matches into active event: " + activeEventName, "success");
+    fetchData(); // refresh table
+  })
+  .catch(function(e){ log("Failed to fetch matches for tagging: " + e.message, "error"); });
+}
+
+function applyLocalFilters(all) {
+  all = normalizeReportList(all);
+  var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
+  all = all.filter(function(d) { return (d.id || Infinity) > hideId; });
+
+  var needsSave = false;
+  all.forEach(function(r) {
+    if (r.id && !eventTags[r.id]) {
+      eventTags[r.id] = activeEventName;
+      needsSave = true;
+    }
+  });
+  if (needsSave) {
+    localStorage.setItem("@scanner_event_tags", JSON.stringify(eventTags));
+    renderEventUI();
+  }
+
+  if (selectedFilterEvents.length > 0) {
+    all = all.filter(function(r) {
+      if (!r.id) return true;
+      return selectedFilterEvents.indexOf(eventTags[r.id]) !== -1;
+    });
+  }
+  return all;
+}
+
+
 
 // ─── DATA TABLE ──────────────────────────────────────────────────────────────
 function fetchData() {
