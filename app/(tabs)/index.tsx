@@ -72,13 +72,18 @@ interface MatchData {
   bumpCross: boolean;
   trenchCross: boolean;
   defended: boolean;
+  wasDefended: boolean;
   incapacitated: boolean;
   teleNotes: string;
   deadTime: string;
   endgameAction: "None" | "Level 1" | "Level 2" | "Level 3" | "Failed";
   climbTime: string;
+  teleClimbFailed: boolean;
+  teleClimbLevel: "None" | "Level 1" | "Level 2" | "Level 3";
   fouls: number;
+  majorFouls: number;
   notes: string;
+  shootingConfidence: number;
 }
 
 interface HistoryItem {
@@ -110,13 +115,18 @@ const INITIAL_MATCH_DATA: MatchData = {
   bumpCross: false,
   trenchCross: false,
   defended: false,
+  wasDefended: false,
   incapacitated: false,
   teleNotes: "",
   deadTime: "",
   endgameAction: "None",
   climbTime: "",
+  teleClimbFailed: false,
+  teleClimbLevel: "None",
   fouls: 0,
+  majorFouls: 0,
   notes: "",
+  shootingConfidence: 3,
 };
 
 // Reusable mini-components to keep our main screen code clean
@@ -905,6 +915,13 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
               setForm((p: any) => ({ ...p, defended: !p.defended }))
             }
           />
+          <ToggleRow
+            label="Was Defended?"
+            checked={form.wasDefended}
+            onToggle={() =>
+              setForm((p: any) => ({ ...p, wasDefended: !p.wasDefended }))
+            }
+          />
 
           <View style={styles.divider} />
 
@@ -986,12 +1003,30 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Post Match</Text>
           <CounterRow
-            label="Fouls"
+            label="Minor Fouls"
             value={form.fouls}
             onChange={(v: number) =>
               setForm((p: any) => ({ ...p, fouls: Math.max(0, p.fouls + v) }))
             }
           />
+          <CounterRow
+            label="Major Fouls"
+            value={form.majorFouls}
+            onChange={(v: number) =>
+              setForm((p: any) => ({ ...p, majorFouls: Math.max(0, p.majorFouls + v) }))
+            }
+          />
+          <Text style={styles.label}>Shooting Confidence (1-5)</Text>
+          <View style={styles.optionRow}>
+            {[1, 2, 3, 4, 5].map((val) => (
+              <OptionButton
+                key={"conf" + val}
+                label={val.toString()}
+                selected={form.shootingConfidence === val}
+                onPress={() => setForm((p: any) => ({ ...p, shootingConfidence: val }))}
+              />
+            ))}
+          </View>
           <Text style={styles.label}>General Qualitative Notes</Text>
           <Text style={styles.tinyTextLight}>
             Keep it short (max 400 chars) for the QR code
@@ -1283,7 +1318,10 @@ export default function App() {
       safeTeleNotes,                                             // 19 (Teleop Notes specifically)
       form.defended,                                             // 20
       station,                                                   // 21
-      form.fouls                                                 // 22
+      form.fouls,                                                // 22
+      form.majorFouls,                                           // 23
+      form.shootingConfidence,                                   // 24
+      form.wasDefended                                           // 25
     ].join('|');
 
     // Attempt to submit to backend real-time matching the required schema strictly
@@ -1297,9 +1335,9 @@ export default function App() {
       inMatch: true,
       notes: fullNotes.substring(0, 400),
       minorFouls: form.fouls,
-      majorFouls: 0,
+      majorFouls: form.majorFouls,
       secondsIncapacitated: parseInt(effectiveDeadTime, 10),
-      shootingConfidence: 3,
+      shootingConfidence: form.shootingConfidence,
       auto: {
         notes: safeAutoNotes.substring(0, 400),
         hubScores: form.autoMake,
@@ -1314,7 +1352,7 @@ export default function App() {
         level: 0,
         climbFailed: false,
         defended: form.defended,
-        wasDefended: false,
+        wasDefended: form.wasDefended,
         passes: form.teleFerry,
       },
       endgame: {

@@ -386,8 +386,8 @@ function normalizeReportList(value) {
   return [];
 }
 
-function fetchReportList(take, skip){
-  var payload = { take: Number(take) || 40, skip: Number(skip) || 0 };
+function fetchReportList(filterConfig){
+  var payload = Object.assign({ take: 40, skip: 0 }, filterConfig || {});
 
   return fetchWithAuth(API_URL + "/get-reports", {
     method: "POST",
@@ -1423,10 +1423,18 @@ function processPitReport(str) {
     autoRoutines: p[10] || "",
     canFerry: p[11] === "1",
     canClimb: p[12] === "1",
-    climbLevels: p[13] ? p[13].split(',').map(Number) : [],
+    climbLevels: p[13] ? p[13].split(',').filter(Boolean).map(Number) : [],
     notes: p[14] || "",
+    indexer: p[15] || "",
     createdAt: new Date().toISOString()
   };
+
+  // Remove undefined properties to be safe
+  for (var key in pitData) {
+    if (pitData[key] === undefined || pitData[key] === null) {
+      delete pitData[key];
+    }
+  }
 
   var existing = JSON.parse(localStorage.getItem("@scanner_pit_reports") || "[]");
   // Overwrite existing data for the same team
@@ -1513,10 +1521,9 @@ function processSingleMatch(str){
     inMatch: true,
     notes: rawNotes.substring(0,400),
     minorFouls: parseInt(p[22], 10) || 0,
-    majorFouls: 0,
+    majorFouls: parseInt(p[23], 10) || 0,
     secondsIncapacitated: incapSeconds,
-    secondsDead: incapSeconds,
-    shootingConfidence: 3,
+    shootingConfidence: parseInt(p[24], 10) || 3,
     auto:{
       notes: autoNotes.substring(0,400),
       hubScores: parseInt(p[5],10)||0, hubMisses: parseInt(p[6],10)||0,
@@ -1526,8 +1533,7 @@ function processSingleMatch(str){
     teleop:{
       notes: teleNotes.substring(0,400),
       hubScores: parseInt(p[10],10)||0, hubMisses:0, level:0,
-      climbFailed:false, defended: p[20]==="true" || p[20]==="1", passes: parseInt(p[11],10)||0,
-      wasDefended: false
+      climbFailed:false, defended: p[20]==="true" || p[20]==="1", wasDefended: p[25]==="true" || p[25]==="1", passes: parseInt(p[11],10)||0
     },
     endgame:{
       notes:"",
@@ -1918,9 +1924,88 @@ function renderTeamDeepDive() {
         "<option value='incap'>Seconds Dead (Incap)</option>" +
       "</select>" +
     "</div>" +
-    "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>";
+    "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>" +
+    "<div id='team-detailed-stats' style='margin-top:20px;'></div>";
 
   updateTeamTimeline();
+  fetchDetailedTeamInfo(teamInput);
+}
+
+function renderDetailedTeamStats(data) {
+  if (!data) return "<p style='color:#888'>Detailed statistics not available.</p>";
+  
+  var noNull = function(v, suffix) { return v === null || v === undefined ? "-" : v.toFixed(1) + (suffix || ""); };
+  var pNoNull = function(v) { return v === null || v === undefined ? "-" : (v * 100).toFixed(1) + "%"; };
+  
+  return "" +
+    "<h4 style='border-bottom:1px solid #444; padding-bottom:5px; margin-top:20px'>Detailed Backend Stats</h4>" +
+    "<div style='display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px; font-size:13px; color:#ccc;'>" +
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#0a84ff; margin:0 0 5px;'>Autonomous</h5>" +
+        "<div><b>Auto Hub:</b> " + noNull(data.auto?.avgHubscores) + "</div>" +
+        "<div><b>Auto Passes:</b> " + noNull(data.auto?.avgPasses) + "</div>" +
+        "<div><b>Auto Climb Lvl:</b> " + noNull(data.auto?.avgLevel) + "</div>" +
+      "</div>" +
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#22c55e; margin:0 0 5px;'>Teleop & Overall Hub</h5>" +
+        "<div><b>Total Hub Avg:</b> " + noNull(data.hub?.scores?.avg) + " (±" + noNull(data.hub?.scores?.stdev) + ")</div>" +
+        "<div><b>Hub Accuracy:</b> " + pNoNull(data.hub?.avgAccuracy) + "</div>" +
+        "<div><b>Teleop Hub Avg:</b> " + noNull(data.teleop?.hubScores?.avg) + " (±" + noNull(data.teleop?.hubScores?.stdev) + ")</div>" +
+        "<div><b>Hub (Defended):</b> " + noNull(data.teleop?.hubScores?.avgWhenDefended) + "</div>" +
+        "<div><b>Teleop Passes:</b> " + noNull(data.teleop?.passes?.avg) + " (±" + noNull(data.teleop?.passes?.stdev) + ")</div>" +
+        "<div><b>Defended %:</b> " + pNoNull(data.teleop?.avgDefended) + "</div>" +
+      "</div>" +
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#ff9500; margin:0 0 5px;'>Endgame & Reliability</h5>" +
+        "<div><b>Endgame Lvl:</b> " + noNull(data.avgEndgameLevel) + "</div>" +
+        "<div><b>Max Climb Level:</b> " + noNull(data.climbLevel) + "</div>" +
+        "<div><b>Downtime (Incap):</b> " + noNull(data.matchesIncapacitated) + " / " + noNull(data.matchesIn) + " matches</div>" +
+        "<div><b>Dead Matches:</b> " + noNull(data.entireMatchesIncapacitated) + "</div>" +
+        "<div><b>No Show:</b> " + noNull(data.matchesMissed) + "</div>" +
+        "<div><b>Driver Events:</b> " + noNull(data.driverEvents) + "</div>" +
+      "</div>" +
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#eab308; margin:0 0 5px;'>Fouls</h5>" +
+        "<div><b>Minor Fouls:</b> " + noNull(data.avgMinorFouls) + "</div>" +
+        "<div><b>Major Fouls:</b> " + noNull(data.avgMajorFouls) + "</div>" +
+      "</div>" +
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#a855f7; margin:0 0 5px;'>Pit Information</h5>" +
+        "<div><b>Drivetrain:</b> " + (data.drivetrain || "Unknown") + "</div>" +
+        "<div><b>Shooter:</b> " + (data.shooter || "Unknown") + "</div>" +
+        "<div><b>Indexer:</b> " + (data.indexer || "Unknown") + "</div>" +
+        "<div><b>Weight:</b> " + noNull(data.weightLbs, " lbs") + "</div>" +
+      "</div>" +
+      (data.epa ? 
+      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+        "<h5 style='color:#f43f5e; margin:0 0 5px;'>EPA Breakdown</h5>" +
+        "<div><b>Total EPA:</b> " + noNull(data.epa.total) + "</div>" +
+        "<div><b>Auto EPA:</b> " + noNull(data.epa.auto) + "</div>" +
+        "<div><b>Teleop EPA:</b> " + noNull(data.epa.teleop) + "</div>" +
+        "<div><b>Endgame EPA:</b> " + noNull(data.epa.endgameTower) + "</div>" +
+      "</div>" : "") +
+    "</div>";
+}
+
+function fetchDetailedTeamInfo(teamNumber) {
+  var container = $("team-detailed-stats");
+  if (!container) return;
+  container.innerHTML = "<p style='color:#888'>Loading detailed team info...</p>";
+  
+  var activeEvt = localStorage.getItem("@scanner_active_event") || "2026A";
+  var eventCode = activeEvt.substring(0,5).padEnd(5,"A");
+  
+  fetchWithAuth(API_URL + "/team/" + eventCode + "/" + teamNumber)
+    .then(function(res){
+      if(!res.ok) throw new Error("Status " + res.status);
+      return res.json();
+    })
+    .then(function(data){
+      container.innerHTML = renderDetailedTeamStats(data);
+    })
+    .catch(function(err){
+      container.innerHTML = "<p style='color:#ff453a'>Failed to load detailed info: " + err.message + "</p>";
+    });
 }
 
 function updateTeamTimeline() {
@@ -2116,7 +2201,7 @@ function tagAllVisibleWithActiveEvent() {
 
   if(!AUTH_TOKEN) return log("Must connect first.", "error");
 
-  fetchReportList(2000, 0)
+  fetchReportList({take: 2000, skip: 0})
   .then(function(data){
     var hideId = parseInt(localStorage.getItem("hideBeforeId") || "0", 10);
     var visibleData = data.filter(function(d){ return (d.id || Infinity) > hideId; });
@@ -2165,7 +2250,7 @@ function applyLocalFilters(all) {
 function fetchData(){
   if(!AUTH_TOKEN) return;
 
-  fetchReportList(40, 0)
+  fetchReportList({take: 40, skip: 0})
   .then(function(data){
     window.lastFetchedMaxId = data.reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
     var visibleData = applyLocalFilters(data);
@@ -2380,7 +2465,7 @@ function printTeamReport(){
   // Try the stats endpoint first; fall back to raw reports on any non-200
   // Note: the backend `/reports` list endpoint usually only returns id, teamNumber, user. 
   // We need to fetch details for these specific reports!
-  fetchReportList(200, 0)
+  fetchReportList({take: 200, skip: 0})
   .then(function(all){
     all = applyLocalFilters(all);
     
@@ -2565,7 +2650,7 @@ function ensureScheduleMap(eventKey, apiKey){
 }
 
 function fetchAllFullReports(){
-  return fetchReportList(2000, 0)
+  return fetchReportList({take: 2000, skip: 0})
   .then(function(all){
     all = applyLocalFilters(all);
     var fullMatchPromises = all.map(function(m){
@@ -2915,7 +3000,7 @@ function printRankings(){
 
   // Since /stats/rankings is returning 404, we will fetch all reports, 
   // request their full details, map them by team, compute averages, and sort them top to bottom.
-  fetchReportList(2000, 0)
+  fetchReportList({take: 2000, skip: 0})
   .then(function(all){
     all = applyLocalFilters(all);
     
