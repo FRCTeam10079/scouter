@@ -113,6 +113,13 @@ tr:hover{background:rgba(255,255,255,.05)}
         <button onclick="printTeamReport()">Generate Team Report</button>
       </div>
       <div style="background:#252525;padding:20px;border-radius:8px">
+        <h4>Team Stats Deep Dive</h4>
+        <p style="font-size:12px;color:#aaa">Detailed backend statistics (Auto, Teleop, Endgame, EPA).</p>
+        <input id="team-stats-team-input" type="number" placeholder="Team #" style="font-size:16px;text-align:center;margin-bottom:10px">
+        <input id="team-stats-event-input" type="text" placeholder="Event Code (e.g. 2024misal)" style="font-size:14px;text-align:center;margin-bottom:10px">
+        <button onclick="fetchTeamStats()">Get Team Stats</button>
+      </div>
+      <div style="background:#252525;padding:20px;border-radius:8px">
         <h4>Event Rankings</h4>
         <p style="font-size:12px;color:#aaa">Top teams by custom metric.</p>
         <div style="display:flex;gap:10px;margin-bottom:10px">
@@ -140,6 +147,18 @@ tr:hover{background:rgba(255,255,255,.05)}
         </div>
         <button onclick="fetch10079Schedule()" style="background:#22c55e; margin-bottom:15px">Fetch 10079 Schedule</button>
         <button onclick="printMatchReportFromInput()" style="background:#ff9500">Generate Match Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TEAM STATS DISPLAY -->
+  <div id="team-stats-modal" class="hidden" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:10000">
+    <div style="background:#1e1e1e;padding:30px;border-radius:12px;border:1px solid #444;max-width:900px;width:90%;max-height:90vh;overflow-y:auto;position:relative">
+      <button onclick="closeTeamStatsModal()" style="position:absolute;top:10px;right:10px;background:#444;padding:8px 12px;border-radius:6px;width:auto;margin:0">✕ Close</button>
+      <div id="team-stats-content" style="margin-top:30px"></div>
+      <div style="margin-top:20px;display:flex;gap:10px;justify-content:center">
+        <button onclick="window.print()" style="background:#22c55e">Print Report</button>
+        <button onclick="closeTeamStatsModal()" style="background:#444">Close</button>
       </div>
     </div>
   </div>
@@ -292,13 +311,20 @@ tr:hover{background:rgba(255,255,255,.05)}
 
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-var API_URL = "https://6k0bvq8z-8000.usw2.devtunnels.ms";
+var API_URL = "http://localhost:8000";
 
 var TIMEOUT  = 5000;
 var SCAN_INTERVAL_MS = 120;
 var SMART_DECODE_INTERVAL_MS = 420;
-var ZXING_LOCAL_IIFE = "./scanner-assets/zxing/reader/index.js";
-var ZXING_LOCAL_WASM = "./scanner-assets/zxing/reader/zxing_reader.wasm";
+var ZXING_LOCAL_IIFE_CANDIDATES = [
+  "./scanner/assets/zxing/reader/index.js",
+  "./scanner-assets/zxing/reader/index.js"
+];
+var ZXING_LOCAL_WASM_CANDIDATES = [
+  "./scanner/assets/zxing/reader/zxing_reader.wasm",
+  "./scanner-assets/zxing/reader/zxing_reader.wasm"
+];
+var ZXING_ACTIVE_WASM = ZXING_LOCAL_WASM_CANDIDATES[0];
 var ZXING_CDN_IIFE = "https://cdn.jsdelivr.net/npm/zxing-wasm@3.0.1/dist/iife/reader/index.js";
 var OFFLINE_QUEUE_KEY = "@scanner_pending_reports_v1";
 var LOCAL_RECENT_REPORTS_KEY = "@scanner_recent_reports_v1";
@@ -318,6 +344,7 @@ var cameraOn        = false;
 var processingFlag  = false;
 var qrLibLoaded     = false;
 var readBarcodesFn  = null;
+var barcodeDetector = null;
 var scanSavedKeys   = Object.create(null);
 var scanInFlightKeys= Object.create(null);
 var pendingReports  = [];
@@ -341,6 +368,9 @@ var visualPanY      = 0;
 var visualTargetZoom = 1;
 var visualCurrentZoom = 1;
 var advancedScanEnabled = true;
+var qrLibInitInFlight = false;
+var qrLibReadyCallbacks = [];
+var pendingCameraStart = false;
 
 var highestScannedMatch = parseInt(localStorage.getItem("@scanner_highest_match") || "0", 10);
 var notifiedMatches = JSON.parse(localStorage.getItem("@scanner_notified_matches") || "{}");
@@ -395,12 +425,44 @@ function fetchReportList(filterConfig){
     body: JSON.stringify(payload),
   })
   .then(function(res){
-    if (res.status === 404) {
-      return fetchWithAuth(API_URL + "/reports?take=" + payload.take + "&skip=" + payload.skip, {});
+    if(res.status === 404){
+      // Legacy backend fallback: fetch raw reports and filter client-side.
+      return fetchWithAuth(API_URL + "/reports/data", { method: "GET" })
+        .then(function(fallbackRes){
+          if(!fallbackRes.ok) throw new Error("report list failed (" + fallbackRes.status + ")");
+          return fallbackRes.json();
+        })
+        .then(function(rows){
+          rows = normalizeReportList(rows);
+
+          if(Array.isArray(payload.eventCodes) && payload.eventCodes.length){
+            rows = rows.filter(function(r){ return payload.eventCodes.indexOf(r.eventCode) !== -1; });
+          }
+          if(Array.isArray(payload.teamNumbers) && payload.teamNumbers.length){
+            rows = rows.filter(function(r){ return payload.teamNumbers.indexOf(r.teamNumber) !== -1; });
+          }
+          if(Array.isArray(payload.matchNumbers) && payload.matchNumbers.length){
+            rows = rows.filter(function(r){ return payload.matchNumbers.indexOf(r.matchNumber) !== -1; });
+          }
+
+          rows.sort(function(a,b){ return new Date(b.createdAt || 0) - new Date(a.createdAt || 0); });
+          rows = rows.slice(payload.skip || 0, (payload.skip || 0) + (payload.take || 40));
+          return rows.map(function(r){
+            return {
+              id: r.id,
+              eventCode: r.eventCode,
+              matchType: r.matchType,
+              matchNumber: r.matchNumber,
+              teamNumber: r.teamNumber,
+              user: r.user || null,
+            };
+          });
+        });
     }
     return res;
   })
   .then(function(res){
+    if(Array.isArray(res)) return res;
     if (!res.ok) throw new Error("report list failed (" + res.status + ")");
     return res.json();
   })
@@ -578,6 +640,59 @@ function enqueuePendingReport(payload){
   return true;
 }
 
+function normalizeAutoClimbForBackend(value){
+  var v = String(value || "").toUpperCase();
+  if(v === "LEVEL1") return "LEVEL1";
+  return "NONE";
+}
+
+function sanitizeReportPayloadForBackend(payload){
+  var p = payload || {};
+  var out = JSON.parse(JSON.stringify(p));
+
+  if(!out.createdAt) out.createdAt = new Date().toISOString();
+  if(out.createdAt && out.createdAt.indexOf("T") === -1){
+    out.createdAt = new Date(out.createdAt).toISOString();
+  }
+
+  out.eventCode = String(out.eventCode || "2026A").substring(0,5).padEnd(5, "A");
+  out.matchType = out.matchType || "QUALIFICATION";
+  out.alliance = out.alliance === "BLUE" ? "BLUE" : "RED";
+  out.inMatch = out.inMatch !== false;
+  out.notes = String(out.notes || "").substring(0,400);
+
+  out.minorFouls = Number(out.minorFouls || 0);
+  out.majorFouls = Number(out.majorFouls || 0);
+  out.secondsDead = Number(out.secondsDead || 0);
+  out.shootingConfidence = Number(out.shootingConfidence || 3);
+  if(out.shootingConfidence < 0) out.shootingConfidence = 0;
+  if(out.shootingConfidence > 5) out.shootingConfidence = 5;
+
+  out.auto = out.auto || {};
+  out.auto.hubScores = Number(out.auto.hubScores || 0);
+  out.auto.hubMisses = Number(out.auto.hubMisses || 0);
+  out.auto.passes = Number(out.auto.passes || 0);
+  out.auto.notes = String(out.auto.notes || "").substring(0,400);
+  out.auto.climb = normalizeAutoClimbForBackend(out.auto.climb);
+
+  out.teleop = out.teleop || {};
+  out.teleop.hubScores = Number(out.teleop.hubScores || 0);
+  out.teleop.hubMisses = Number(out.teleop.hubMisses || 0);
+  out.teleop.passes = Number(out.teleop.passes || 0);
+  out.teleop.defended = !!out.teleop.defended;
+  out.teleop.wasDefended = !!out.teleop.wasDefended;
+  out.teleop.notes = String(out.teleop.notes || "").substring(0,400);
+
+  out.endgame = out.endgame || {};
+  out.endgame.level = Number(out.endgame.level || 0);
+  if(out.endgame.level < 0) out.endgame.level = 0;
+  if(out.endgame.level > 3) out.endgame.level = 3;
+  out.endgame.climbFailed = !!out.endgame.climbFailed;
+  out.endgame.notes = String(out.endgame.notes || "").substring(0,400);
+
+  return out;
+}
+
 function flushPendingReports(){
   if(!AUTH_TOKEN || AUTH_TOKEN === "offline-demo-token" || pendingReports.length === 0) return;
 
@@ -588,11 +703,18 @@ function flushPendingReports(){
   var chain = Promise.resolve();
   queue.forEach(function(item){
     chain = chain.then(function(){
-      return fetchWithAuth(API_URL + "/report", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(item.payload)
+      var sanitizedPayload = sanitizeReportPayloadForBackend(item.payload);
+      item.payload = sanitizedPayload;
+      return fetchWithAuth(API_URL + "/report", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(sanitizedPayload)
       })
       .then(function(res){
         if(res.status === 201) {
           savedCount++;
+          return;
+        }
+        if(res.status === 400){
+          // Invalid payloads should not stay in retry queue forever.
+          log("Dropped invalid queued report (HTTP 400).", "error");
           return;
         }
         return res.json()
@@ -646,8 +768,25 @@ function hideAllMatches(){
 
 // ─── QR LIBRARY (loaded only when entering scanner tab) ──────────────────────
 function ensureQrLib(cb){
-  if(qrLibLoaded){ cb(); return; }
+  if(typeof cb === "function") qrLibReadyCallbacks.push(cb);
+
+  if(qrLibLoaded){
+    while(qrLibReadyCallbacks.length){
+      try { qrLibReadyCallbacks.shift()(); } catch(_e){}
+    }
+    return;
+  }
+  if(qrLibInitInFlight) return;
+
+  qrLibInitInFlight = true;
   libMsg.textContent = "Loading zxing-wasm scanner (offline-first)...";
+
+  var flushReadyCallbacks = function(){
+    qrLibInitInFlight = false;
+    while(qrLibReadyCallbacks.length){
+      try { qrLibReadyCallbacks.shift()(); } catch(_e){}
+    }
+  };
 
   var onReady = function(){
     if(!(window.ZXingWASM && typeof window.ZXingWASM.readBarcodes === "function")){
@@ -657,7 +796,7 @@ function ensureQrLib(cb){
       window.ZXingWASM.prepareZXingModule({
         overrides: {
           locateFile: function(path, prefix){
-            if(path && path.endsWith(".wasm")) return ZXING_LOCAL_WASM;
+            if(path && path.endsWith(".wasm")) return ZXING_ACTIVE_WASM;
             return prefix + path;
           }
         }
@@ -666,7 +805,7 @@ function ensureQrLib(cb){
     readBarcodesFn = window.ZXingWASM.readBarcodes;
     qrLibLoaded = true;
     libMsg.textContent = "";
-    cb();
+    flushReadyCallbacks();
     return true;
   };
 
@@ -684,14 +823,77 @@ function ensureQrLib(cb){
   };
 
   // Try local vendored assets first so scanner works without internet.
-  loadScript(ZXING_LOCAL_IIFE, function(){
-    libMsg.textContent = "Local scanner assets missing; trying CDN...";
-    libMsg.style.color="#ff9500";
-    loadScript(ZXING_CDN_IIFE, function(){
-      libMsg.textContent = "QR lib failed (offline and no local assets).";
-      libMsg.style.color="#ff453a";
+  var tryLocalScriptAt = function(idx){
+    if(idx >= ZXING_LOCAL_IIFE_CANDIDATES.length){
+      libMsg.textContent = "Local scanner assets missing; trying CDN...";
+      libMsg.style.color="#ff9500";
+      loadScript(ZXING_CDN_IIFE, function(){
+        if(initBarcodeDetector()){
+          qrLibLoaded = true;
+          libMsg.textContent = "Using browser BarcodeDetector fallback.";
+          libMsg.style.color = "#ff9500";
+          log("ZXing failed to load; using BarcodeDetector fallback.", "info");
+          flushReadyCallbacks();
+          return;
+        }
+
+        qrLibInitInFlight = false;
+        libMsg.textContent = "QR lib failed (offline and no local assets).";
+        libMsg.style.color="#ff453a";
+      });
+      return;
+    }
+
+    ZXING_ACTIVE_WASM = ZXING_LOCAL_WASM_CANDIDATES[idx] || ZXING_LOCAL_WASM_CANDIDATES[0];
+    loadScript(ZXING_LOCAL_IIFE_CANDIDATES[idx], function(){
+      tryLocalScriptAt(idx + 1);
     });
-  });
+  };
+
+  tryLocalScriptAt(0);
+}
+
+function initBarcodeDetector(){
+  if(barcodeDetector) return true;
+  if(!(window && "BarcodeDetector" in window)) return false;
+
+  try{
+    barcodeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    return true;
+  } catch(_e){
+    barcodeDetector = null;
+    return false;
+  }
+}
+
+function extractQrTextFromResults(results){
+  if(!results || !results.length) return null;
+  var item = results[0] || {};
+  return item.text || item.rawValue || item.value || item.content || null;
+}
+
+function decodeFrameText(frame, w, h){
+  if(readBarcodesFn){
+    return readBarcodesFn(frame, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
+      .then(function(results){
+        var text = extractQrTextFromResults(results);
+        if(text) return text;
+
+        if(!barcodeDetector) return null;
+        return barcodeDetector.detect(scanCanvasEl)
+          .then(function(found){
+            return extractQrTextFromResults(found);
+          })
+          .catch(function(){ return null; });
+      });
+  }
+
+  if(!barcodeDetector) return Promise.resolve(null);
+  return barcodeDetector.detect(scanCanvasEl)
+    .then(function(found){
+      return extractQrTextFromResults(found);
+    })
+    .catch(function(){ return null; });
 }
 
 function ensureScanElements(){
@@ -855,6 +1057,7 @@ function maybeUpdateHardwareZoom(){
 }
 
 function runSmartDecodeSweep(frame, w, h){
+  if(!readBarcodesFn) return Promise.resolve(null);
   var now = Date.now();
   if((now - lastSmartDecodeTs) < SMART_DECODE_INTERVAL_MS) return Promise.resolve(null);
   lastSmartDecodeTs = now;
@@ -878,7 +1081,8 @@ function runSmartDecodeSweep(frame, w, h){
     if(!roiFrame) return next();
     return readBarcodesFn(roiFrame, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
       .then(function(results){
-        if(results && results.length > 0 && results[0].text) return results[0].text;
+        var text = extractQrTextFromResults(results);
+        if(text) return text;
         return next();
       })
       .catch(function(){ return next(); });
@@ -1075,15 +1279,40 @@ function showScanner(){
 
 // ─── CAMERA ──────────────────────────────────────────────────────────────────
 function toggleCamera(){
-  if(!qrLibLoaded || !readBarcodesFn){ log("QR library not ready yet.", "error"); return; }
   if(cameraOn){
+    pendingCameraStart = false;
     stopCamera();
-  } else {
-    startCamera();
+    return;
   }
+
+  if(!readBarcodesFn) initBarcodeDetector();
+  if(!qrLibLoaded && !readBarcodesFn && !barcodeDetector){
+    pendingCameraStart = true;
+    log("Initializing QR scanner engine...", "info");
+    ensureQrLib(function(){
+      if(!pendingCameraStart || cameraOn) return;
+      if(!readBarcodesFn) initBarcodeDetector();
+      if(!readBarcodesFn && !barcodeDetector){
+        pendingCameraStart = false;
+        log("QR scanner engine failed to initialize.", "error");
+        return;
+      }
+      startCamera();
+    });
+    return;
+  }
+
+  if(!readBarcodesFn && !barcodeDetector){
+    log("QR scanner not ready yet. Waiting for ZXing/BarcodeDetector.", "error");
+    return;
+  }
+
+  pendingCameraStart = false;
+  startCamera();
 }
 
 function startCamera(){
+  pendingCameraStart = false;
   ensureScanElements();
   normalizeCameraViewport();
   likelyQrStreak = 0;
@@ -1155,6 +1384,7 @@ function startCamera(){
 }
 
 function stopCamera(){
+  pendingCameraStart = false;
   if(scanLoopId){
     cancelAnimationFrame(scanLoopId);
     scanLoopId = null;
@@ -1211,15 +1441,15 @@ function scanFrameLoop(ts){
   ctx.drawImage(scanVideoEl, 0, 0, w, h);
   var frame = ctx.getImageData(0, 0, w, h);
 
-  readBarcodesFn(frame, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
-    .then(function(results){
-      if(results && results.length > 0 && results[0].text){
+  decodeFrameText(frame, w, h)
+    .then(function(foundText){
+      if(foundText){
         likelyQrStreak = 0;
         hideScanHint();
         resetDigitalZoomVisual();
         targetZoom = zoomMin;
         maybeUpdateHardwareZoom();
-        onScanSuccess(results[0].text);
+        onScanSuccess(foundText);
         return;
       }
 
@@ -1451,16 +1681,16 @@ function printAllPitReports() {
   if(reports.length === 0) { alert("No Pit Reports scanned yet."); return; }
   
   var rows = reports.map(function(r) {
-    return "<tr><td style='font-weight:bold'>" + r.teamNumber + "</td><td>" + r.drivetrain + "</td><td>" + r.shooter + "</td><td>" + (r.hasDrumShooter ? "Yes" : "No") + "</td><td>" + r.estimatedBps + "</td><td>" + r.driverExperience + "</td><td>" + r.weight + "</td><td>" + r.autoRoutines + "</td><td>" + r.notes + "</td></tr>";
+    return "<tr><td style='font-weight:bold'>" + r.teamNumber + "</td><td>" + r.drivetrain + "</td><td>" + r.shooter + "</td><td>" + (r.hasDrumShooter ? "Yes" : "No") + "</td><td>" + r.estimatedBps + "</td><td>" + r.driverExperience + "</td><td>" + r.weight + "</td><td>" + (r.canFerry ? "Yes" : "No") + "</td><td>" + (r.canClimb ? "Yes ("+r.climbLevels.join(",")+")" : "No") + "</td><td>" + r.indexer + "</td><td>" + r.autoRoutines + "</td><td>" + r.notes + "</td></tr>";
   }).join("");
   
   var html = "<h1>Scanned Pit Reports (Offline Cache)</h1>" +
     "<p>These reports were scanned via QR Code directly from devices.</p>" +
     "<table border='1' cellspacing='0' cellpadding='8' style='width:100%; text-align:left; border-collapse:collapse;'>" +
-    "<tr style='background:#f0f0f0'><th>Team</th><th>Drive</th><th>Shooter</th><th>Drum?</th><th>Est. BPS</th><th>Exp</th><th>Weight</th><th>Auto</th><th>Notes</th></tr>" +
+    "<tr style='background:#f0f0f0'><th>Team</th><th>Drive</th><th>Shooter</th><th>Drum?</th><th>Est. BPS</th><th>Exp</th><th>Weight</th><th>Ferry?</th><th>Climb?</th><th>Indexer</th><th>Auto</th><th>Notes</th></tr>" +
     rows + "</table>";
     
-  openPrint(html, "");
+  openPrint(html, "@media print{@page{size:landscape}}");
 }
 
 function processSingleMatch(str){
@@ -1522,7 +1752,7 @@ function processSingleMatch(str){
     notes: rawNotes.substring(0,400),
     minorFouls: parseInt(p[22], 10) || 0,
     majorFouls: parseInt(p[23], 10) || 0,
-    secondsIncapacitated: incapSeconds,
+    secondsDead: incapSeconds,
     shootingConfidence: parseInt(p[24], 10) || 3,
     auto:{
       notes: autoNotes.substring(0,400),
@@ -1541,6 +1771,8 @@ function processSingleMatch(str){
       climbFailed: p[14]==="Failed"
     }
   };
+
+  payload = sanitizeReportPayloadForBackend(payload);
 
   return fetchWithAuth(API_URL + "/report", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
   })
@@ -1769,6 +2001,9 @@ function loadAllianceData() {
           avgAuto: stats.avgAutoHub,
           avgTele: stats.avgTeleHub,
           avgFerry: stats.avgFerry,
+          epaTotal: stats.epaTotal,
+          epaAuto: stats.epaAuto,
+          epaTeleop: stats.epaTeleop,
           climbRate: stats.climbAttempts > 0 ? Math.round((stats.climbSuccesses / stats.matchesPlayed)*100) : 0,
           avgIncap: stats.avgIncap,
           matches: stats.matchesPlayed,
@@ -1883,20 +2118,24 @@ function sortAllianceTable(col, forceRetainDirection) {
       "<td>"+t.climbRate+"%</td>" +
       "<td>"+t.avgIncap.toFixed(1)+"</td>" +
       "<td>"+t.matches+"</td>" +
+        "<td><button onclick='window.scrollTo(0,0); document.getElementById(\"alliance-search-input\").value=\""+t.teamNumber+"\"; renderTeamDeepDive("+t.teamNumber+");' style='margin:0;padding:4px 8px;border-radius:4px;font-size:12px;background:#0a84ff;color:#fff;border:none;cursor:pointer;'>Dive</button></td>" +
     "</tr>";
   }).join("");
   $("alliance-roster-body").innerHTML = html;
 }
 
-function renderTeamDeepDive() {
-  var teamInput = parseInt($("alliance-search-input").value, 10);
+function renderTeamDeepDive(overrideTeam) {
+  var teamInput = typeof overrideTeam === "number" ? overrideTeam : parseInt($("alliance-search-input").value, 10);
   if(!teamInput || isNaN(teamInput)) return;
 
   var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
   var panel = $("alliance-deep-dive-content");
   if(!tm) {
+    // If the team isn't in our local scout roster, let's just attempt to fetch detailed from backend anyways
     panel.style.display = "block";
-    panel.innerHTML = "<div style='color:#ff453a'>Team " + teamInput + " not found. Ensure you fetched data.</div>";
+    panel.innerHTML = "<h4 style='margin:0 0 0px;color:#ff3b30;font-size:18px'>Team " + teamInput + " - No Local Data</h4>" + 
+                      "<div id='team-detailed-stats' style='margin-top:10px;'></div>";
+    fetchDetailedTeamInfo(teamInput);
     return;
   }
 
@@ -1927,20 +2166,32 @@ function renderTeamDeepDive() {
     "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>" +
     "<div id='team-detailed-stats' style='margin-top:20px;'></div>";
 
-  updateTeamTimeline();
+  updateTeamTimeline(teamInput);
   fetchDetailedTeamInfo(teamInput);
 }
 
 function renderDetailedTeamStats(data) {
   if (!data) return "<p style='color:#888'>Detailed statistics not available.</p>";
   
-  var noNull = function(v, suffix) { return v === null || v === undefined ? "-" : v.toFixed(1) + (suffix || ""); };
-  var pNoNull = function(v) { return v === null || v === undefined ? "-" : (v * 100).toFixed(1) + "%"; };
-  
-  return "" +
-    "<h4 style='border-bottom:1px solid #444; padding-bottom:5px; margin-top:20px'>Detailed Backend Stats</h4>" +
-    "<div style='display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px; font-size:13px; color:#ccc;'>" +
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+    var noNull = function(v, suffix) { c
+      if (v === null || v === undefined) return "-";
+      if (typeof v === "number") return v.toFixed(1) + (suffix || "");
+      return v + (suffix || "");
+    };
+    var pNoNull = function(v) { 
+      if (v === null || v === undefined) return "-";
+      if (typeof v === "number") return (v * 100).toFixed(1) + "%";
+      return v;
+    };
+    
+    var driverEvts = (Array.isArray(data.driverEvents) && data.driverEvents.length > 0) 
+      ? data.driverEvents.join(", ") 
+      : "None";
+
+    return "" +
+      "<h4 style='border-bottom:1px solid #444; padding-bottom:5px; margin-top:20px'>Detailed Backend Stats</h4>" +
+      "<div style='display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px; font-size:13px; color:#ccc;'>" +
+        "<div style='background:#222; padding:10px; border-radius:8px;'>" +
         "<h5 style='color:#0a84ff; margin:0 0 5px;'>Autonomous</h5>" +
         "<div><b>Auto Hub:</b> " + noNull(data.auto?.avgHubscores) + "</div>" +
         "<div><b>Auto Passes:</b> " + noNull(data.auto?.avgPasses) + "</div>" +
@@ -1952,7 +2203,11 @@ function renderDetailedTeamStats(data) {
         "<div><b>Hub Accuracy:</b> " + pNoNull(data.hub?.avgAccuracy) + "</div>" +
         "<div><b>Teleop Hub Avg:</b> " + noNull(data.teleop?.hubScores?.avg) + " (±" + noNull(data.teleop?.hubScores?.stdev) + ")</div>" +
         "<div><b>Hub (Defended):</b> " + noNull(data.teleop?.hubScores?.avgWhenDefended) + "</div>" +
-        "<div><b>Teleop Passes:</b> " + noNull(data.teleop?.passes?.avg) + " (±" + noNull(data.teleop?.passes?.stdev) + ")</div>" +
+        "</div>" +
+        "<div style='background:#222; padding:10px; border-radius:8px;'>" +
+          "<h5 style='color:#74b9ff; margin:0 0 5px;'>Passes & Defense</h5>" +
+          "<div><b>Total Passes Avg:</b> " + noNull(data.passes?.avg) + " (±" + noNull(data.passes?.stdev) + ")</div>" +
+          "<div><b>Teleop Passes:</b> " + noNull(data.teleop?.passes?.avg) + " (±" + noNull(data.teleop?.passes?.stdev) + ")</div>" +
         "<div><b>Defended %:</b> " + pNoNull(data.teleop?.avgDefended) + "</div>" +
       "</div>" +
       "<div style='background:#222; padding:10px; border-radius:8px;'>" +
@@ -1962,7 +2217,7 @@ function renderDetailedTeamStats(data) {
         "<div><b>Downtime (Incap):</b> " + noNull(data.matchesIncapacitated) + " / " + noNull(data.matchesIn) + " matches</div>" +
         "<div><b>Dead Matches:</b> " + noNull(data.entireMatchesIncapacitated) + "</div>" +
         "<div><b>No Show:</b> " + noNull(data.matchesMissed) + "</div>" +
-        "<div><b>Driver Events:</b> " + noNull(data.driverEvents) + "</div>" +
+        "<div><b>Driver Events:</b> " + driverEvts + "</div>" +
       "</div>" +
       "<div style='background:#222; padding:10px; border-radius:8px;'>" +
         "<h5 style='color:#eab308; margin:0 0 5px;'>Fouls</h5>" +
@@ -1981,10 +2236,14 @@ function renderDetailedTeamStats(data) {
         "<h5 style='color:#f43f5e; margin:0 0 5px;'>EPA Breakdown</h5>" +
         "<div><b>Total EPA:</b> " + noNull(data.epa.total) + "</div>" +
         "<div><b>Auto EPA:</b> " + noNull(data.epa.auto) + "</div>" +
-        "<div><b>Teleop EPA:</b> " + noNull(data.epa.teleop) + "</div>" +
+        "<div><b>Auto Hub EPA:</b> " + noNull(data.epa.autoHub) + "</div>" +
+          "<div><b>Auto Tower EPA:</b> " + noNull(data.epa.autoTower) + "</div>" +
+          "<div><b>Teleop EPA:</b> " + noNull(data.epa.teleop) + "</div>" +
+          "<div><b>Teleop Hub EPA:</b> " + noNull(data.epa.teleopHub) + "</div>" +
         "<div><b>Endgame EPA:</b> " + noNull(data.epa.endgameTower) + "</div>" +
       "</div>" : "") +
-    "</div>";
+    "</div>" +
+    "<div style='margin-top:20px;'><button onclick='{var t=document.getElementById(\"alliance-deep-dive-content\").innerHTML; openPrint(\"<h1 style=\\\"margin-top:0\\\">Team \"+document.getElementById(\"alliance-search-input\").value+\" Detailed Report</h1>\"+t, \"@media print { * { color: #000 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } body, #alliance-deep-dive-content, div[style*=\\\"background:#1a1a1a\\\"] { background: transparent !important; } div[style*=\\\"background:#222\\\"] { background: transparent !important; border: 1px solid #aaa !important; } }\");}' style='padding:8px 16px;background:#0a84ff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer'>🖨️ Print Team Card</button></div>";
 }
 
 function fetchDetailedTeamInfo(teamNumber) {
@@ -1995,7 +2254,7 @@ function fetchDetailedTeamInfo(teamNumber) {
   var activeEvt = localStorage.getItem("@scanner_active_event") || "2026A";
   var eventCode = activeEvt.substring(0,5).padEnd(5,"A");
   
-  fetchWithAuth(API_URL + "/team/" + eventCode + "/" + teamNumber)
+  fetchWithAuth(API_URL + "/team/" + encodeURIComponent(teamNumber) + "?eventCode=" + encodeURIComponent(eventCode))
     .then(function(res){
       if(!res.ok) throw new Error("Status " + res.status);
       return res.json();
@@ -2008,8 +2267,8 @@ function fetchDetailedTeamInfo(teamNumber) {
     });
 }
 
-function updateTeamTimeline() {
-  var teamInput = parseInt($("alliance-search-input").value, 10);
+function updateTeamTimeline(overrideTeam) {
+  var teamInput = typeof overrideTeam === "number" ? overrideTeam : parseInt($("alliance-search-input").value, 10);
   var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
   if(!tm) return;
 
@@ -2026,7 +2285,7 @@ function updateTeamTimeline() {
     else if (m.notes && m.notes.includes("Level 2")) ep = 2;
     else if (m.notes && m.notes.includes("Level 1")) ep = 1;
     var fVol = parseInt((m.teleop && m.teleop.passes)||0, 10) || parseInt(p.ferry||0, 10);
-    var incapSec = parseInt(m.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+    var incapSec = parseInt(m.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
     
     var autoPts = aHubs * 2;
     var totalPts = autoPts + tHubs + (ep * 10);
@@ -2088,6 +2347,7 @@ function printAllianceSheet() {
       "<td style='border:1px solid #000;padding:6px;text-align:center;font-weight:bold'>" + t.opr.toFixed(1) + "</td>" +
       "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.avgAuto.toFixed(1) + "</td>" +
       "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.avgFerry.toFixed(1) + "</td>" +
+      "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.epaTotal.toFixed(1) + "</td>" +
       "<td style='border:1px solid #000;padding:6px;text-align:center'>" + t.climbRate + "%</td>" +
       "<td style='border:1px solid #000;padding:6px'>" + flags + gFlags + "</td>" +
     "</tr>";
@@ -2103,6 +2363,7 @@ function printAllianceSheet() {
         "<th style='border:1px solid #000;padding:6px;width:60px'>Power</th>" +
         "<th style='border:1px solid #000;padding:6px;width:60px'>Avg Auto</th>" +
         "<th style='border:1px solid #000;padding:6px;width:60px'>Avg Ferry</th>" +
+        "<th style='border:1px solid #000;padding:6px;width:60px'>EPA Total</th>" +
         "<th style='border:1px solid #000;padding:6px;width:60px'>Climb %</th>" +
         "<th style='border:1px solid #000;padding:6px'>Notable Flags</th>" +
       "</tr></thead>" +
@@ -2361,12 +2622,12 @@ function computeStatsFromMatches(matches){
     totEndPts += endPts;
     if(endPts > maxEndPts) maxEndPts = endPts;
     
-    totIncap     += parseInt(r.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+    totIncap     += parseInt(r.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
 
     if(r.overBump  || p.bump)   bumpCount++;
     if(r.underTrench || p.trench) trenchCount++;
     if(t.defended || p.defended) defendedCount++;
-    if(r.secondsIncapacitated > 0 || p.dead) deadCount++;
+    if(r.secondsDead > 0 || p.dead) deadCount++;
 
     var start = (r.startingPosition || p.start || "Unknown").toString().toLowerCase();
     if(start.indexOf("left") !== -1) startPosCounts.Left++;
@@ -2450,7 +2711,7 @@ function printTeamReport(){
         matchNumber: i+1, teamNumber: parseInt(team),
         user: { firstName: ["Alex","Sam","Jordan","Riley","Morgan","Casey"][i] },
         startingPosition: ["Left","Center","Right","Left","Center","Right"][i],
-        secondsIncapacitated: i===3 ? 45 : 0,
+        secondsDead: i===3 ? 45 : 0,
         overBump: i%2===0, underTrench: i%3===0,
         auto:    { hubScores: 10+i*5, hubMisses: i, climb: i===1?"LEVEL1":"NONE", passes: i%3 },
         teleop:  { hubScores: 20+i*3, hubMisses: i, passes: i*2 },
@@ -2547,13 +2808,13 @@ function buildTeamSummaryHTML(team, s){
     "<p style='color:#666;margin:0 0 18px;font-size:13px'>"+s.matchesPlayed+" matches analyzed • Last report "+new Date().toLocaleDateString()+"</p>" +
     
     "<div style='background:#f5f5f5;border-left:4px solid #0a84ff;padding:14px;margin-bottom:24px'>" +
-      "<p style='margin:0;font-size:14px'><b>Team summary:</b> This team averages <b>"+fmtNum(s.avgScore)+" points</b> per match with a high of <b>"+s.maxScore+"</b> (Match Q"+best.matchNumber+"). They typically "+climbStr+" and "+climbSummary+".</p>" +
+      "<p style='margin:0;font-size:14px'><b>Team summary:</b> This team averages <b>"+fmtNum(s.avgScore)+" points</b> (EPA Total: "+fmtNum(s.epaTotal)+") per match with a high of <b>"+s.maxScore+"</b> (Match Q"+best.matchNumber+"). They typically "+climbStr+" and "+climbSummary+".</p>" +
     "</div>" +
     
     "<h3 style='margin:20px 0 8px;font-size:15px;font-weight:600'>Scoring Overview</h3>" +
     "<div style='font-size:13px;line-height:1.6;margin-bottom:20px;color:#333'>" +
-      "<p style='margin:6px 0'><b>Auto Phase:</b> Averages "+fmtNum(s.avgAutoHub)+" hits (max "+s.maxAutoHub+"), with "+fmtNum(s.avgAutoMiss)+" misses</p>" +
-      "<p style='margin:6px 0'><b>Teleop Phase:</b> Averages "+fmtNum(s.avgTeleHub)+" hits (max "+s.maxTeleHub+"), ferry volume "+fmtNum(s.avgFerry)+" (max "+s.maxFerry+")</p>" +
+      "<p style='margin:6px 0'><b>Auto Phase (EPA: "+fmtNum(s.epaAuto)+"):</b> Averages "+fmtNum(s.avgAutoHub)+" hits (max "+s.maxAutoHub+"), misses: "+fmtNum(s.avgAutoMiss)+", passes: "+fmtNum(s.avgAutoPasses)+", L1: "+s.autoL1Scores+", L2: "+s.autoL2Scores+", L3: "+s.autoL3Scores+", L4: "+s.autoL4Scores+"</p>" +
+      "<p style='margin:6px 0'><b>Teleop Phase (EPA: "+fmtNum(s.epaTeleop)+"):</b> Averages "+fmtNum(s.avgTeleHub)+" hits (max "+s.maxTeleHub+"), passes "+fmtNum(s.avgTeleopPasses)+", L1: "+s.teleL1Scores+", L2: "+s.teleL2Scores+", L3: "+s.teleL3Scores+", L4: "+s.teleL4Scores+", Processor: "+s.processor+"</p>" +
     "</div>" +
     
     buildAutoPositionHTML(s) +
@@ -2562,7 +2823,7 @@ function buildTeamSummaryHTML(team, s){
     "<div style='font-size:13px;line-height:1.6;margin-bottom:20px;color:#333'>" +
       "<p style='margin:6px 0'><b>Climb attempts:</b> "+s.climbAttempts+" times, "+s.climbSuccesses+" successful ("+s.climbTryFreq+"%)</p>" +
       "<p style='margin:6px 0'><b>Climb levels:</b> L3: "+el[3]+" | L2: "+el[2]+" | L1: "+el[1]+" | L0: "+el[0]+" | Failed: "+el["fail"]+"</p>" +
-      "<p style='margin:6px 0'><b>Mobility & Play:</b> Bump: "+s.bumpPct+" | Trench: "+s.trenchPct+" | Defended: "+s.defendedPct+"</p>" +
+      "<p style='margin:6px 0'><b>Mobility & Play:</b> Bump: "+s.bumpPct+" | Trench: "+s.trenchPct+" | Defended: "+s.defendedPct+" (Rate: "+fmtNum(s.defendedRate)+"%)</p>" +
       "<p style='margin:6px 0'><b>Reliability:</b> Robot died in "+s.deadPct+"% of matches (avg "+fmtNum(s.avgIncap)+" sec downtime)</p>" +
     "</div>" +
     
@@ -2577,6 +2838,348 @@ function renderTeamPrint(team, s, isFallback){
     : "";
   var body = disclaimer + buildTeamSummaryHTML(team, s);
   openPrint(body, "");
+}
+
+function formatNum(val, decimals){
+  if(val == null) return "—";
+  var n = Number(val);
+  return isNaN(n) ? "—" : n.toFixed(decimals || 1);
+}
+
+function closeTeamStatsModal(){
+  $("team-stats-modal").classList.add("hidden");
+}
+
+function buildEventCodeCandidates(rawEventCode){
+  var inputRaw = String(rawEventCode || "").trim();
+  if(!inputRaw) return [];
+
+  var out = [];
+  function pushUnique(v){
+    if(!v) return;
+    if(out.indexOf(v) === -1) out.push(v);
+  }
+
+  function pushAllCase(v){
+    if(!v) return;
+    pushUnique(v);
+    pushUnique(String(v).toLowerCase());
+    pushUnique(String(v).toUpperCase());
+  }
+
+  pushAllCase(inputRaw);
+  if(inputRaw.length >= 5) pushAllCase(inputRaw.substring(0,5));
+
+  // If user enters a full event key like 2026pncmp, also try bare code pncmp.
+  var stripped = inputRaw.replace(/^\d{4}/, "");
+  pushAllCase(stripped);
+  if(stripped.length >= 5) pushAllCase(stripped.substring(0,5));
+
+  return out;
+}
+
+function normalizeTeamStatsEventCode(rawEventCode){
+  var input = String(rawEventCode || "").trim();
+  if(!input) return "";
+  // Backend expects exactly 5 chars. Full keys like 2026pncmp should become pncmp.
+  var withoutYear = input.replace(/^\d{4}/, "");
+  var base = withoutYear || input;
+  return base.substring(0,5);
+}
+
+function tryFetchTeamStatsByRoutes(teamNum, eventCodes){
+  var routes = [];
+  eventCodes.forEach(function(ev){
+    routes.push(API_URL + "/team/" + encodeURIComponent(ev) + "/" + encodeURIComponent(teamNum));
+    routes.push(API_URL + "/team/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(ev));
+  });
+
+  var idx = 0;
+  function next(){
+    if(idx >= routes.length) return Promise.reject(new Error("No matching team-stats route found (all returned 404)."));
+    var url = routes[idx++];
+    return fetchWithAuth(url, {})
+      .then(function(res){
+        if(res.status === 404) return next();
+        if(!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      });
+  }
+
+  return next();
+}
+
+function safeNum(v){
+  var n = Number(v);
+  return isNaN(n) ? 0 : n;
+}
+
+function avgOrZero(sum, count){
+  if(!count) return 0;
+  return sum / count;
+}
+
+function reportEventMatchesCandidates(reportEventCode, eventCodes){
+  var ev = String(reportEventCode || "").trim();
+  if(!ev) return false;
+  var evLower = ev.toLowerCase();
+  for(var i=0; i<eventCodes.length; i++){
+    var cand = String(eventCodes[i] || "").trim();
+    if(!cand) continue;
+    var cLower = cand.toLowerCase();
+    if(evLower === cLower) return true;
+    if(evLower.substring(0,5) === cLower.substring(0,5)) return true;
+  }
+  return false;
+}
+
+function buildTeamStatsFromReports(matches){
+  var n = matches.length;
+  if(!n) return null;
+
+  var autoHub=0, autoMiss=0, autoPass=0, autoLevel=0;
+  var teleHub=0, teleMiss=0, telePass=0, teleDefended=0;
+  var endLevel=0;
+  var minorF=0, majorF=0;
+  var missed=0, incap=0;
+  var drivetrain="", shooter="", indexer="";
+  var weight = null;
+
+  matches.forEach(function(r){
+    var a = r.auto || {};
+    var t = r.teleop || {};
+    var e = r.endgame || {};
+    var packed = parsePackedNotes(r.notes || "");
+
+    autoHub += safeNum(a.hubScores);
+    autoMiss += safeNum(a.hubMisses);
+    autoPass += safeNum(a.passes);
+    autoLevel += safeNum(a.level);
+
+    teleHub += safeNum(t.hubScores);
+    teleMiss += safeNum(t.hubMisses);
+    telePass += safeNum(t.passes || packed.ferry);
+    if(t.defended || packed.defended) teleDefended++;
+
+    endLevel += safeNum(e.level);
+    minorF += safeNum(r.minorFouls);
+    majorF += safeNum(r.majorFouls);
+    if(r.inMatch === false) missed++;
+    if(safeNum(r.secondsDead) > 0) incap++;
+
+    if(!drivetrain && r.drivetrain) drivetrain = r.drivetrain;
+    if(!shooter && r.shooter) shooter = r.shooter;
+    if(!indexer && r.indexer) indexer = r.indexer;
+    if(weight == null && r.weightLbs != null) weight = r.weightLbs;
+  });
+
+  var totalHub = autoHub + teleHub;
+  var totalMiss = autoMiss + teleMiss;
+  var attempts = totalHub + totalMiss;
+
+  return {
+    hub: {
+      scores: { avg: avgOrZero(totalHub, n), stdev: 0 },
+      avgAccuracy: attempts ? (totalHub / attempts) * 100 : 0
+    },
+    passes: {
+      avg: avgOrZero(autoPass + telePass, n),
+      stdev: 0
+    },
+    auto: {
+      avgHubscores: avgOrZero(autoHub, n),
+      avgLevel: avgOrZero(autoLevel, n),
+      avgPasses: avgOrZero(autoPass, n)
+    },
+    teleop: {
+      hubScores: {
+        avg: avgOrZero(teleHub, n),
+        stdev: 0,
+        avgWhenDefended: teleDefended ? avgOrZero(teleHub, teleDefended) : 0
+      },
+      passes: { avg: avgOrZero(telePass, n) },
+      avgDefended: (teleDefended / n) * 100
+    },
+    avgEndgameLevel: avgOrZero(endLevel, n),
+    avgMinorFouls: avgOrZero(minorF, n),
+    avgMajorFouls: avgOrZero(majorF, n),
+    matchesIn: n,
+    matchesMissed: missed,
+    matchesIncapacitated: incap,
+    drivetrain: drivetrain || "Unknown",
+    shooter: shooter || "Unknown",
+    indexer: indexer || "Unknown",
+    climbLevel: Math.round(avgOrZero(endLevel, n)),
+    driverEvents: 0,
+    weightLbs: weight,
+    epa: null
+  };
+}
+
+function fetchLocalTeamStats(teamNum, eventCodes){
+  return fetchReportList({take: 2000, skip: 0})
+    .then(function(all){
+      var teamMatches = normalizeReportList(all).filter(function(r){
+        return String(r.teamNumber) === String(teamNum);
+      });
+
+      if(teamMatches.length === 0) throw new Error("No reports found for this team.");
+
+      var eventMatches = teamMatches.filter(function(r){
+        return reportEventMatchesCandidates(r.eventCode, eventCodes);
+      });
+      var picked = eventMatches.length ? eventMatches : teamMatches;
+
+      var fullPromises = picked.map(function(r){
+        if(!r.id) return Promise.resolve(r);
+        return fetchWithAuth(API_URL + "/report/" + r.id, {})
+          .then(function(res){
+            if(!res.ok) return r;
+            return res.json();
+          })
+          .catch(function(){ return r; });
+      });
+
+      return Promise.all(fullPromises);
+    })
+    .then(function(fullMatches){
+      var stats = buildTeamStatsFromReports(fullMatches);
+      if(!stats) throw new Error("Unable to build team stats from local reports.");
+      return stats;
+    });
+}
+
+function fetchTeamStats(){
+  var teamNum = $("team-stats-team-input").value;
+  var eventCode = $("team-stats-event-input").value;
+  
+  if(!teamNum || !eventCode) {
+    alert("Please enter both team number and event code.");
+    return;
+  }
+  
+  var normalizedEventCode = normalizeTeamStatsEventCode(eventCode);
+  if(!normalizedEventCode || normalizedEventCode.length !== 5){
+    alert("Please enter a valid event code.");
+    return;
+  }
+
+  log("Fetching team stats for Team " + teamNum + " (Event: " + normalizedEventCode + ")...", "info");
+
+  var url = API_URL + "/team/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(normalizedEventCode);
+  fetchWithAuth(url, {})
+    .then(function(res){
+      if(!res.ok){
+        if(res.status === 404){
+          return fetchLocalTeamStats(teamNum, [normalizedEventCode]).then(function(localStats){
+            renderTeamStatsCard(teamNum, normalizedEventCode, localStats);
+            log("Team route 404; loaded team stats from local reports", "info");
+            return null;
+          });
+        }
+        return res.json().catch(function(){ return {}; }).then(function(err){
+          var code = err && err.code ? (" [" + err.code + "]") : "";
+          throw new Error("HTTP " + res.status + code);
+        });
+      }
+      return res.json();
+    })
+    .then(function(stats){
+      if(!stats) return;
+      renderTeamStatsCard(teamNum, normalizedEventCode, stats);
+      log("Team stats loaded from backend", "success");
+    })
+    .catch(function(err){
+      log("Failed to fetch team stats: " + err.message, "error");
+      alert("Error fetching team stats: " + err.message + "\n\nExpected backend route: GET /team/:number?eventCode=XXXXX");
+    });
+}
+
+function renderTeamStatsCard(teamNum, eventCode, stats){
+  var html = "<div style='text-align:left'>" +
+    "<h2 style='margin:0 0 8px;color:#0a84ff'>Team " + teamNum + " - " + eventCode.toUpperCase() + "</h2>" +
+    "<p style='color:#aaa;margin:0 0 20px;font-size:13px'>Detailed match statistics from backend</p>";
+  
+  // Hub Scores
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#34d399'>Hub Scoring</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Avg Hub Scores</b><br>" + formatNum(stats.hub && stats.hub.scores && stats.hub.scores.avg) + "</div>" +
+      "<div><b>Hub Stdev</b><br>" + formatNum(stats.hub && stats.hub.scores && stats.hub.scores.stdev) + "</div>" +
+      "<div><b>Hub Accuracy</b><br>" + formatNum(stats.hub && stats.hub.avgAccuracy, 2) + "%" + "</div>" +
+    "</div></div>";
+  
+  // Passes
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#34d399'>Passes</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Avg Passes</b><br>" + formatNum(stats.passes && stats.passes.avg) + "</div>" +
+      "<div><b>Pass Consistency (Stdev)</b><br>" + formatNum(stats.passes && stats.passes.stdev) + "</div>" +
+    "</div></div>";
+  
+  // Auto Phase
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#ff9500'>Auto Phase</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Avg Hub Scores</b><br>" + formatNum(stats.auto && stats.auto.avgHubScores) + "</div>" +
+      "<div><b>Avg Level</b><br>" + formatNum(stats.auto && stats.auto.avgLevel, 2) + "</div>" +
+      "<div><b>Avg Passes</b><br>" + formatNum(stats.auto && stats.auto.avgPasses) + "</div>" +
+    "</div></div>";
+  
+  // Teleop Phase
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#00bfff'>Teleop Phase</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Avg Hub Scores</b><br>" + formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avg) + "</div>" +
+      "<div><b>Hub Stdev</b><br>" + formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.stdev) + "</div>" +
+      "<div><b>Avg When Defended</b><br>" + formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avgWhenDefended) + "</div>" +
+      "<div><b>Avg Passes</b><br>" + formatNum(stats.teleop && stats.teleop.passes && stats.teleop.passes.avg) + "</div>" +
+      "<div><b>Defended Rate</b><br>" + formatNum(stats.teleop && stats.teleop.avgDefended, 2) + "% (" + (stats.teleop && Math.round(stats.teleop.avgDefended) || "?") + " matches)</div>" +
+    "</div></div>";
+  
+  // Endgame & Fouls
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#a855f7'>Endgame & Reliability</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Avg Endgame Level</b><br>" + formatNum(stats.avgEndgameLevel) + "</div>" +
+      "<div><b>Minor Fouls</b><br>" + formatNum(stats.avgMinorFouls) + "</div>" +
+      "<div><b>Major Fouls</b><br>" + formatNum(stats.avgMajorFouls) + "</div>" +
+      "<div><b>Matches Played</b><br>" + (stats.matchesIn || "?") + "</div>" +
+      "<div><b>Missed Matches</b><br>" + (stats.matchesMissed || "0") + "</div>" +
+      "<div><b>Incapacitated in Match</b><br>" + (stats.matchesIncapacitated || "0") + "</div>" +
+    "</div></div>";
+  
+  // Team Info
+  html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+    "<h3 style='margin:0 0 12px;font-size:14px;color:#22c55e'>Team Design</h3>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
+      "<div><b>Drivetrain</b><br>" + (stats.drivetrain || "Unknown") + "</div>" +
+      "<div><b>Shooter</b><br>" + (stats.shooter || "Unknown") + "</div>" +
+      "<div><b>Indexer</b><br>" + (stats.indexer || "Unknown") + "</div>" +
+      "<div><b>Climb Level</b><br>" + (stats.climbLevel || "0") + "</div>" +
+      "<div><b>Driver Events</b><br>" + (stats.driverEvents || "0") + "</div>" +
+      "<div><b>Weight (lbs)</b><br>" + (stats.weightLbs || "?") + "</div>" +
+    "</div></div>";
+  
+  // EPA
+  if(stats.epa){
+    html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
+      "<h3 style='margin:0 0 12px;font-size:14px;color:#ff6b9d'>EPA Breakdown</h3>" +
+      "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
+        "<div><b>Total EPA</b><br style='color:#ff6b9d;font-size:16px;font-weight:bold'>" + formatNum(stats.epa.total) + "</div>" +
+        "<div><b>Auto</b><br>" + formatNum(stats.epa.auto) + "</div>" +
+        "<div><b>Auto Hub</b><br>" + formatNum(stats.epa.autoHub) + "</div>" +
+        "<div><b>Auto Tower</b><br>" + formatNum(stats.epa.autoTower) + "</div>" +
+        "<div><b>Teleop</b><br>" + formatNum(stats.epa.teleop) + "</div>" +
+        "<div><b>Teleop Hub</b><br>" + formatNum(stats.epa.teleopHub) + "</div>" +
+        "<div><b>Endgame Tower</b><br>" + formatNum(stats.epa.endgameTower) + "</div>" +
+      "</div></div>";
+  }
+  
+  html += "</div>";
+  
+  $("team-stats-content").innerHTML = html;
+  $("team-stats-modal").classList.remove("hidden");
 }
 
 function getStoredTbaConfig(){
@@ -2783,8 +3386,16 @@ function teamBoxHtml(slot, teamNum, teamStats, matchReports, conflictLines){
   return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fff'>" +
     "<div style='display:flex;justify-content:space-between;align-items:center'><div style='font-weight:bold'>"+slot+" - Team "+teamNum+"</div><div style='font-size:11px;color:#666'>"+s.matchesPlayed+" total matches</div></div>" +
     "<div style='font-size:12px;margin-top:6px'>Current match: Auto <b>"+currentMatchAuto+"</b>, Tele <b>"+currentMatchTele+"</b></div>" +
-    "<div style='font-size:12px;margin-top:4px'>Auto Avg/Max: <b>"+fmtNum(s.avgAutoHub)+" / "+s.maxAutoHub+"</b> &nbsp; | &nbsp; Tele Avg/Max: <b>"+fmtNum(s.avgTeleHub)+" / "+s.maxTeleHub+"</b></div>" +
-    "<div style='font-size:12px;margin-top:4px'>Best Match: <b>Q"+(s.bestMatch ? s.bestMatch.matchNumber : "?")+" ("+(s.bestMatch ? s.bestMatch.totalScore : 0)+")</b> &nbsp; | &nbsp; Climb Try/Succeed: <b>"+s.climbAttempts+" / "+s.climbSuccesses+"</b></div>" +
+    "<div style='font-size:12px;margin-top:4px;display:grid;grid-template-columns:1fr 1fr;gap:4px'>" +
+      "<div><b>Auto Avg/Max/EPA:</b> "+fmtNum(s.avgAutoHub)+"/"+s.maxAutoHub+"/"+fmtNum(s.epaAuto)+"</div>" +
+      "<div><b>Tele Avg/Max/EPA:</b> "+fmtNum(s.avgTeleHub)+"/"+s.maxTeleHub+"/"+fmtNum(s.epaTeleop)+"</div>" +
+      "<div><b>L1/L2/L3/L4 Auto:</b> "+s.autoL1Scores+"/"+s.autoL2Scores+"/"+s.autoL3Scores+"/"+s.autoL4Scores+"</div>" +
+      "<div><b>L1/L2/L3/L4 Tele:</b> "+s.teleL1Scores+"/"+s.teleL2Scores+"/"+s.teleL3Scores+"/"+s.teleL4Scores+"</div>" +
+      "<div><b>Processor/Net/Algae/Coral:</b> "+s.processor+"/0/0/0</div>" +
+      "<div><b>Defended %:</b> "+fmtNum(s.defendedRate)+"%</div>" +
+      "<div><b>Passes Auto/Tele:</b> "+fmtNum(s.avgAutoPasses)+"/"+fmtNum(s.avgTeleopPasses)+"</div>" +
+      "<div><b>Climb S/F:</b> "+s.climbSuccesses+" / "+s.climbAttempts+"</div>" +
+    "</div>" +
     "<div style='font-size:12px;margin-top:4px'>Dominant Auto Start: <b>"+s.dominantStart+"</b></div>" +
     conflictBlock +
   "</div>";
@@ -2993,7 +3604,7 @@ function printRankings(){
   log("Fetching rankings for top " + limit + " by " + metricLabel + "...", "info");
 
   if (AUTH_TOKEN === "offline-demo-token") {
-    var list = Array.from({length:limit},function(_,i){ return {teamNumber:1000+i,avgScore:50-i*2,avgAuto:15,avgTele:35-i*2,avgEndPts:10,avgFerry:i*2,avgAutoMiss:i,avgIncap:0,matchesPlayed:4}; });
+    var list = Array.from({length:limit},function(_,i){ return {teamNumber:1000+i,avgScore:50-i*2,avgAuto:15,avgTele:35-i*2,avgEndPts:10,avgFerry:i*2,avgAutoMiss:i,avgIncap:0,matchesPlayed:4, epaTotal: 10, epaAuto: 3, epaTeleop: 5, epaEndgame: 2, avgAutoPasses: i, avgTeleopPasses: i, autoL1Scores: i, autoL2Scores: i, autoL3Scores: i, autoL4Scores: i, teleL1Scores: i, teleL2Scores: i, teleL3Scores: i, teleL4Scores: i, processor: i, net: i, defendedRate: i, climbSuccesses: i, climbAttempts: i}; });
     renderRankingsHTML(list, limit, metricLabel, metric);
     return;
   }
@@ -3043,7 +3654,26 @@ function printRankings(){
           avgFerry: parseFloat(stats.avgFerry),
           avgAutoMiss: parseFloat(stats.avgAutoMiss),
           avgIncap: parseFloat(stats.avgIncap),
-          matchesPlayed: stats.matchesPlayed
+          matchesPlayed: stats.matchesPlayed,
+          epaTotal: parseFloat(stats.epaTotal),
+          epaAuto: parseFloat(stats.epaAuto),
+          epaTeleop: parseFloat(stats.epaTeleop),
+          epaEndgame: parseFloat(stats.epaEndgame),
+          avgAutoPasses: parseFloat(stats.avgAutoPasses),
+          avgTeleopPasses: parseFloat(stats.avgTeleopPasses),
+          autoL1Scores: stats.autoL1Scores,
+          autoL2Scores: stats.autoL2Scores,
+          autoL3Scores: stats.autoL3Scores,
+          autoL4Scores: stats.autoL4Scores,
+          teleL1Scores: stats.teleL1Scores,
+          teleL2Scores: stats.teleL2Scores,
+          teleL3Scores: stats.teleL3Scores,
+          teleL4Scores: stats.teleL4Scores,
+          processor: stats.processor,
+          net: stats.net,
+          defendedRate: stats.defendedRate,
+          climbSuccesses: stats.climbSuccesses,
+          climbAttempts: stats.climbAttempts
         });
       }
     });
@@ -3064,9 +3694,24 @@ function printRankings(){
 
 function renderRankingsHTML(list, limit, metricLabel, metric) {
   var rows = list.slice(0,limit).map(function(r,i){
-    return "<tr><td style='padding:10px;border-bottom:1px solid #ddd'>"+(i+1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'><strong>"+r.teamNumber+"</strong></td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgScore).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAuto).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgTele).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgFerry).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgEndPts).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAutoMiss).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgIncap).toFixed(1)+"</td><td style='padding:10px;border-bottom:1px solid #ddd;color:#888'>"+r.matchesPlayed+"</td></tr>";
+    return "<tr><td style='padding:10px;border-bottom:1px solid #ddd'>"+(i+1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'><strong>"+r.teamNumber+"</strong>"+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgScore).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.epaTotal).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.epaAuto).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.epaTeleop).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAuto).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgTele).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgFerry).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgEndPts).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+r.autoL1Scores+"/"+r.autoL2Scores+"/"+r.autoL3Scores+"/"+r.autoL4Scores+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+r.teleL1Scores+"/"+r.teleL2Scores+"/"+r.teleL3Scores+"/"+r.teleL4Scores+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.avgAutoPasses).toFixed(1)+"/"+Number(r.avgTeleopPasses).toFixed(1)+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+Number(r.defendedRate).toFixed(1)+
+    "%</td><td style='padding:10px;border-bottom:1px solid #ddd'>"+r.climbSuccesses+"/"+r.climbAttempts+
+    "</td><td style='padding:10px;border-bottom:1px solid #ddd;color:#888'>"+r.matchesPlayed+"</td></tr>";
   }).join("");
-  openPrint("<h1>Event Rankings: Top " + limit + " Teams</h1><h3 style='margin-top:0;color:#555'>Sorted by: " + metricLabel + "</h3><table style='width:100%;border-collapse:collapse;text-align:left;font-size:12px'><thead><tr style='background:#f0f0f0'><th style='padding:10px'>Rank</th><th style='padding:10px'>Team</th><th style='padding:10px'>Avg Total</th><th style='padding:10px'>Auto Pts</th><th style='padding:10px'>Tele Hubs</th><th style='padding:10px'>Ferry</th><th style='padding:10px'>End Pts</th><th style='padding:10px'>Auto Miss</th><th style='padding:10px'>Incap Sec</th><th style='padding:10px'>Matches</th></tr></thead><tbody>"+rows+"</tbody></table>");
+  openPrint("<h1>Event Rankings: Top " + limit + " Teams</h1><h3 style='margin-top:0;color:#555'>Sorted by: " + metricLabel + "</h3><table style='width:100%;border-collapse:collapse;text-align:left;font-size:12px'><thead><tr style='background:#f0f0f0'><th style='padding:10px'>Rank</th><th style='padding:10px'>Team</th><th style='padding:10px'>Avg Total</th><th style='padding:10px'>EPA Total</th><th style='padding:10px'>EPA Auto</th><th style='padding:10px'>EPA Tele</th><th style='padding:10px'>Auto Pts</th><th style='padding:10px'>Tele Hubs</th><th style='padding:10px'>Ferry</th><th style='padding:10px'>Endgame Pts</th><th style='padding:10px'>Auto L1/L2/L3/L4</th><th style='padding:10px'>Tele L1/L2/L3/L4</th><th style='padding:10px'>Auto/Tele Passes</th><th style='padding:10px'>Defended %</th><th style='padding:10px'>Climb S/A</th><th style='padding:10px'>Matches</th></tr></thead><tbody>"+rows+"</tbody></table>", "@media print{@page{size:landscape}}");
 }
 
 function openPrint(html, extraStyle){
@@ -3092,8 +3737,9 @@ fileInput.addEventListener("change", function(e){
   var file = e.target.files[0];
   readBarcodesFn(file, { formats: ["QRCode"], maxNumberOfSymbols: 1, tryHarder: true })
     .then(function(results){
-      if(results && results.length > 0 && results[0].text){
-        onScanSuccess(results[0].text);
+      var text = extractQrTextFromResults(results);
+      if(text){
+        onScanSuccess(text);
       } else {
         log("Could not read QR from image.", "error");
       }

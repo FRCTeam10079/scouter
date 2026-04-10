@@ -48,6 +48,9 @@ let visualPanY = 0;
 let visualTargetZoom = 1;
 let visualCurrentZoom = 1;
 let advancedScanEnabled = true;
+let qrLibInitInFlight = false;
+const qrLibReadyCallbacks = [];
+let pendingCameraStart = false;
 
 // ─── DOM REFS ────────────────────────────────────────────────────────────────
 function $(id) {
@@ -95,7 +98,7 @@ function normalizeReportList(value) {
 async function fetchReportList(take, skip) {
   const payload = { take: Number(take) || 40, skip: Number(skip) || 0 };
 
-  let res = await fetchTimeout(`${API_URL}/get-reports`, {
+  const res = await fetchTimeout(`${API_URL}/get-reports`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -104,14 +107,27 @@ async function fetchReportList(take, skip) {
     body: JSON.stringify(payload),
   });
 
-  // Some backend deployments expose GET /reports instead.
   if (res.status === 404) {
-    res = await fetchTimeout(
-      `${API_URL}/reports?take=${payload.take}&skip=${payload.skip}`,
-      {
-        headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
-      },
-    );
+    const fallbackRes = await fetchTimeout(`${API_URL}/reports/data`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+    });
+
+    if (!fallbackRes.ok) {
+      throw new Error(`report list failed (${fallbackRes.status})`);
+    }
+
+    const all = normalizeReportList(await fallbackRes.json());
+    all.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const sliced = all.slice(payload.skip || 0, (payload.skip || 0) + (payload.take || 40));
+    return sliced.map((r) => ({
+      id: r.id,
+      eventCode: r.eventCode,
+      matchType: r.matchType,
+      matchNumber: r.matchNumber,
+      teamNumber: r.teamNumber,
+      user: r.user || null,
+    }));
   }
 
   if (!res.ok) {
@@ -238,6 +254,26 @@ function enqueuePendingReport(payload) {
   return true;
 }
 
+function normalizeAutoClimbForBackend(value) {
+  const v = String(value || "").toUpperCase();
+  if (v === "LEVEL1") return "LEVEL1";
+  return "NONE";
+}
+
+function sanitizeReportPayloadForBackend(payload) {
+  const p = payload || {};
+  const out = JSON.parse(JSON.stringify(p));
+
+  out.eventCode = String(out.eventCode || "2026A").substring(0, 5).padEnd(5, "A");
+  out.matchType = out.matchType || "QUALIFICATION";
+  out.alliance = out.alliance === "BLUE" ? "BLUE" : "RED";
+
+  out.auto = out.auto || {};
+  out.auto.climb = normalizeAutoClimbForBackend(out.auto.climb);
+
+  return out;
+}
+
 function flushPendingReports() {
   if (
     !AUTH_TOKEN ||
@@ -252,6 +288,7 @@ function flushPendingReports() {
 
   let chain = Promise.resolve();
   queue.forEach((item) => {
+    item.payload = sanitizeReportPayloadForBackend(item.payload);
     chain = chain.then(() =>
       fetchTimeout(`${API_URL}/report`, {
         method: "POST",
@@ -264,6 +301,10 @@ function flushPendingReports() {
         .then((res) => {
           if (res.status === 201) {
             savedCount++;
+            return;
+          }
+          if (res.status === 400) {
+            log("Dropped invalid queued report (HTTP 400).", "error");
             return;
           }
           return res
@@ -329,11 +370,29 @@ function hideAllMatches() {
 
 // ─── QR LIBRARY (loaded only when entering scanner tab) ──────────────────────
 function ensureQrLib(cb) {
+  if (typeof cb === "function") qrLibReadyCallbacks.push(cb);
+
   if (qrLibLoaded) {
-    cb();
+    while (qrLibReadyCallbacks.length) {
+      try {
+        qrLibReadyCallbacks.shift()();
+      } catch (_e) {}
+    }
     return;
   }
+  if (qrLibInitInFlight) return;
+
+  qrLibInitInFlight = true;
   libMsg.textContent = "Loading zxing-wasm scanner (offline-first)...";
+
+  const flushReadyCallbacks = () => {
+    qrLibInitInFlight = false;
+    while (qrLibReadyCallbacks.length) {
+      try {
+        qrLibReadyCallbacks.shift()();
+      } catch (_e) {}
+    }
+  };
 
   const onReady = () => {
     if (
@@ -354,7 +413,7 @@ function ensureQrLib(cb) {
     readBarcodesFn = window.ZXingWASM.readBarcodes;
     qrLibLoaded = true;
     libMsg.textContent = "";
-    cb();
+    flushReadyCallbacks();
     return true;
   };
 
@@ -376,10 +435,17 @@ function ensureQrLib(cb) {
     libMsg.textContent = "Local scanner assets missing; trying CDN...";
     libMsg.style.color = "#ff9500";
     loadScript(ZXING_CDN_IIFE, () => {
+      qrLibInitInFlight = false;
       libMsg.textContent = "QR lib failed (offline and no local assets).";
       libMsg.style.color = "#ff453a";
     });
   });
+}
+
+function extractQrTextFromResults(results) {
+  if (!results || !results.length) return null;
+  const item = results[0] || {};
+  return item.text || item.rawValue || item.value || item.content || null;
 }
 
 function ensureScanElements() {
@@ -619,8 +685,8 @@ function runSmartDecodeSweep(frame, w, h) {
       tryHarder: true,
     })
       .then((results) => {
-        if (results && results.length > 0 && results[0].text)
-          return results[0].text;
+        const text = extractQrTextFromResults(results);
+        if (text) return text;
         return next();
       })
       .catch(() => next());
@@ -808,18 +874,33 @@ function showScanner() {
 
 // ─── CAMERA ──────────────────────────────────────────────────────────────────
 function toggleCamera() {
-  if (!qrLibLoaded || !readBarcodesFn) {
-    log("QR library not ready yet.", "error");
+  if (cameraOn) {
+    pendingCameraStart = false;
+    stopCamera();
     return;
   }
-  if (cameraOn) {
-    stopCamera();
-  } else {
-    startCamera();
+
+  if (!qrLibLoaded || !readBarcodesFn) {
+    pendingCameraStart = true;
+    log("Initializing QR scanner engine...", "info");
+    ensureQrLib(() => {
+      if (!pendingCameraStart || cameraOn) return;
+      if (!qrLibLoaded || !readBarcodesFn) {
+        pendingCameraStart = false;
+        log("QR scanner engine failed to initialize.", "error");
+        return;
+      }
+      startCamera();
+    });
+    return;
   }
+
+  pendingCameraStart = false;
+  startCamera();
 }
 
 function startCamera() {
+  pendingCameraStart = false;
   ensureScanElements();
   normalizeCameraViewport();
   likelyQrStreak = 0;
@@ -905,6 +986,7 @@ function startCamera() {
 }
 
 function stopCamera() {
+  pendingCameraStart = false;
   if (scanLoopId) {
     cancelAnimationFrame(scanLoopId);
     scanLoopId = null;
@@ -974,13 +1056,14 @@ function scanFrameLoop(ts) {
     tryHarder: true,
   })
     .then((results) => {
-      if (results && results.length > 0 && results[0].text) {
+      const qrText = extractQrTextFromResults(results);
+      if (qrText) {
         likelyQrStreak = 0;
         hideScanHint();
         resetDigitalZoomVisual();
         targetZoom = zoomMin;
         maybeUpdateHardwareZoom();
-        onScanSuccess(results[0].text);
+        onScanSuccess(qrText);
         return;
       }
 
@@ -1276,43 +1359,45 @@ function processSingleMatch(str) {
     },
   };
 
+  const sanitizedPayload = sanitizeReportPayloadForBackend(payload);
+
   return fetchTimeout(`${API_URL}/report`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${AUTH_TOKEN}`,
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(sanitizedPayload),
   })
     .then((res) => {
       if (res.status === 201) {
         log(`Saved Match ${p[1]} (Team ${p[2]})`, "success");
-        upsertRecentReport(payload, "Saved");
+        upsertRecentReport(sanitizedPayload, "Saved");
         return { match: p[1], team: p[2] };
       }
       return res.json().then((err) => {
         if (err.message && err.message.indexOf("Unique") !== -1) {
           log(`Match ${p[1]} already saved. Skipped.`, "info");
-          upsertRecentReport(payload, "Saved");
+          upsertRecentReport(sanitizedPayload, "Saved");
           return { match: p[1], team: p[2] };
         }
         log(
           `Backend rejected Match ${p[1]} (Team ${p[2]}): ${err.message || JSON.stringify(err)}`,
           "error",
         );
-        const queued = enqueuePendingReport(payload);
+        const queued = enqueuePendingReport(sanitizedPayload);
         if (queued) {
           log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
-          upsertRecentReport(payload, "Queued");
+          upsertRecentReport(sanitizedPayload, "Queued");
         }
         return { match: p[1], team: p[2] };
       });
     })
     .catch((_e) => {
-      const queued = enqueuePendingReport(payload);
+      const queued = enqueuePendingReport(sanitizedPayload);
       if (queued) {
         log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
-        upsertRecentReport(payload, "Queued");
+        upsertRecentReport(sanitizedPayload, "Queued");
       } else {
         log(`Already queued offline: Match ${p[1]} (Team ${p[2]}).`, "info");
       }
@@ -3202,8 +3287,9 @@ fileInput.addEventListener("change", (e) => {
     tryHarder: true,
   })
     .then((results) => {
-      if (results && results.length > 0 && results[0].text) {
-        onScanSuccess(results[0].text);
+      const text = extractQrTextFromResults(results);
+      if (text) {
+        onScanSuccess(text);
       } else {
         log("Could not read QR from image.", "error");
       }
