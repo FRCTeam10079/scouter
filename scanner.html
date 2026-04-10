@@ -105,7 +105,10 @@ tr:hover{background:rgba(255,255,255,.05)}
     <h3 class="section-title">Print Stats Center</h3>
     <p style="color:#888;margin-bottom:20px">Generate printer-friendly reports for drive coaches.</p>
     <div class="grid">
-      <button onclick="printAllPitReports()" style="background:#8a2be2">Print Scanned Pit Reports</button> 
+      <div style="display:grid;grid-template-columns:1fr;gap:10px">
+        <button onclick="printAllPitReports()" style="background:#8a2be2">Print Scanned Pit Reports</button>
+        <button onclick="syncPitReportsToBackend()" style="background:#0ea5e9">Sync Pit Reports to Backend</button>
+      </div>
       <div style="background:#252525;padding:20px;border-radius:8px"> 
         <h4>Single Team Report</h4>
         <input id="print-team-input" type="number" placeholder="Enter Team # (e.g. 254)" style="font-size:18px;text-align:center">
@@ -279,6 +282,15 @@ tr:hover{background:rgba(255,255,255,.05)}
           Advanced scan assist (hint + smart sweep + auto zoom)
         </label>
         <input id="file-input" type="file" accept="image/*" class="hidden">
+
+        <div style="margin-top:12px;background:#252525;border:1px solid #3a3a3a;border-radius:8px;padding:10px">
+          <div style="font-size:12px;color:#bbb;margin-bottom:6px;font-weight:bold">Manual Raw QR Input</div>
+          <textarea id="manual-qr-input" placeholder="Paste raw QR text here (single or batch with # separators)" style="width:100%;min-height:90px;resize:vertical;padding:10px;background:#1f1f1f;border:1px solid #444;color:#fff;border-radius:6px;box-sizing:border-box;font-family:monospace;font-size:12px"></textarea>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button onclick="submitManualRawQr()" style="margin:0;background:#0ea5e9">Save From Raw Text</button>
+            <button class="secondary" onclick="clearManualRawQr()" style="margin:0">Clear</button>
+          </div>
+        </div>
       </div>
       <div>
         <h3>System Logs</h3>
@@ -533,6 +545,35 @@ function clearLogs(){
   log("Logs cleared.");
 }
 
+function submitManualRawQr(){
+  var input = $("manual-qr-input");
+  if(!input) return;
+
+  var raw = String(input.value || "")
+    .replace(/\r\n/g, "")
+    .replace(/\n/g, "")
+    .trim();
+
+  if(!raw){
+    alert("Paste raw QR text first.");
+    return;
+  }
+
+  if(processingFlag){
+    log("Already processing another scan. Please wait.", "info");
+    return;
+  }
+
+  processingFlag = true;
+  log("Processing manually pasted raw QR text...", "info");
+  handleRawQR(raw);
+}
+
+function clearManualRawQr(){
+  var input = $("manual-qr-input");
+  if(input) input.value = "";
+}
+
 window.upcomingPrintMatch = null;
 
 function showPrintNotification(matchNum, customMessage) {
@@ -642,6 +683,7 @@ function enqueuePendingReport(payload){
 
 function normalizeAutoClimbForBackend(value){
   var v = String(value || "").toUpperCase();
+  if(v === "FAILED") return "FAILED";
   if(v === "LEVEL1") return "LEVEL1";
   return "NONE";
 }
@@ -663,7 +705,9 @@ function sanitizeReportPayloadForBackend(payload){
 
   out.minorFouls = Number(out.minorFouls || 0);
   out.majorFouls = Number(out.majorFouls || 0);
-  out.secondsDead = Number(out.secondsDead || 0);
+  var incapacitatedSeconds = Number(out.secondsIncapacitated || out.secondsDead || 0);
+  out.secondsIncapacitated = incapacitatedSeconds;
+  out.secondsDead = incapacitatedSeconds;
   out.shootingConfidence = Number(out.shootingConfidence || 3);
   if(out.shootingConfidence < 0) out.shootingConfidence = 0;
   if(out.shootingConfidence > 5) out.shootingConfidence = 5;
@@ -1640,24 +1684,73 @@ function handleRawQR(raw){
 
 function processPitReport(str) {
   var p = str.split("|");
-  var pitData = {
-    teamNumber: p[1] || "Unknown",
-    drivetrain: p[2] || "",
-    shooter: p[3] || "",
-    hasDrumShooter: p[4] === "1",
-    estimatedBps: p[5] || "",
-    driverExperience: p[6] || "",
-    weight: p[7] || "",
-    width: p[8] || "",
-    length: p[9] || "",
-    autoRoutines: p[10] || "",
-    canFerry: p[11] === "1",
-    canClimb: p[12] === "1",
-    climbLevels: p[13] ? p[13].split(',').filter(Boolean).map(Number) : [],
-    notes: p[14] || "",
-    indexer: p[15] || "",
-    createdAt: new Date().toISOString()
+  var knownIndexers = {
+    VERTICAL: true,
+    SPINDEXER: true,
+    ROLLER: true,
+    BELT: true,
+    GRAVITY: true
   };
+
+  var indexerToken = String(p[4] || "").toUpperCase();
+  var isNewPitFormat = !!knownIndexers[indexerToken];
+  var pitData;
+
+  if(isNewPitFormat){
+    var levelsNew = p[15] ? p[15].split(',').filter(Boolean).map(Number) : [];
+    var topClimbNew = 0;
+    levelsNew.forEach(function(l){
+      var n = parseInt(l, 10) || 0;
+      if(n > topClimbNew) topClimbNew = n;
+    });
+
+    pitData = {
+      teamNumber: p[1] || "Unknown",
+      drivetrain: p[2] || "",
+      shooter: p[3] || "",
+      indexer: p[4] || "VERTICAL",
+      estimatedBps: p[5] || "",
+      driverEvents: p[6] || "0",
+      driverExperience: p[6] || "0",
+      weightLbs: p[7] || "",
+      weight: p[7] || "",
+      autoRoutines: p[8] || "",
+      canPass: p[9] === "1",
+      canFerry: p[9] === "1",
+      canDefend: p[10] === "1",
+      canCrossBump: p[11] === "1",
+      canCrossTrench: p[12] === "1",
+      hopperCapacity: p[13] || "1",
+      canClimb: p[14] === "1",
+      climbLevels: levelsNew,
+      climbLevel: topClimbNew,
+      notes: p[16] || "",
+      hasDrumShooter: String(p[3] || "").toUpperCase().indexOf("DRUM") !== -1,
+      createdAt: new Date().toISOString()
+    };
+  } else {
+    pitData = {
+      teamNumber: p[1] || "Unknown",
+      drivetrain: p[2] || "",
+      shooter: p[3] || "",
+      hasDrumShooter: p[4] === "1",
+      estimatedBps: p[5] || "",
+      driverExperience: p[6] || "",
+      driverEvents: p[6] || "",
+      weight: p[7] || "",
+      weightLbs: p[7] || "",
+      width: p[8] || "",
+      length: p[9] || "",
+      autoRoutines: p[10] || "",
+      canFerry: p[11] === "1",
+      canPass: p[11] === "1",
+      canClimb: p[12] === "1",
+      climbLevels: p[13] ? p[13].split(',').filter(Boolean).map(Number) : [],
+      notes: p[14] || "",
+      indexer: p[15] || "",
+      createdAt: new Date().toISOString()
+    };
+  }
 
   // Remove undefined properties to be safe
   for (var key in pitData) {
@@ -1673,7 +1766,166 @@ function processPitReport(str) {
   localStorage.setItem("@scanner_pit_reports", JSON.stringify(existing));
 
   log("Saved local Pit Report for Team " + pitData.teamNumber, "success");
+
+  if(AUTH_TOKEN && AUTH_TOKEN !== "offline-demo-token" && navigator.onLine){
+    return uploadPitReportToBackend(pitData)
+      .then(function(){
+        log("Synced Pit Report for Team " + pitData.teamNumber, "success");
+        return { match: "PIT", team: pitData.teamNumber };
+      })
+      .catch(function(err){
+        log("Pit report backend sync failed for Team " + pitData.teamNumber + ": " + err.message, "error");
+        return { match: "PIT", team: pitData.teamNumber };
+      });
+  }
+
   return Promise.resolve({ match: "PIT", team: pitData.teamNumber });
+}
+
+function normalizeDrivetrainEnum(raw){
+  var v = String(raw || "").toUpperCase();
+  if(v.indexOf("SWERVE") !== -1) return "SWERVE";
+  if(v.indexOf("MECANUM") !== -1) return "MECANUM";
+  return "TANK";
+}
+
+function normalizeShooterEnum(raw, hasDrumShooter){
+  if(hasDrumShooter) return "DRUM";
+  var v = String(raw || "").toUpperCase();
+  if(v.indexOf("DUAL") !== -1 && v.indexOf("TURRET") !== -1) return "DUAL_TURRET";
+  if(v.indexOf("TURRET") !== -1) return "TURRET";
+  if(v.indexOf("QUAD") !== -1) return "QUAD";
+  if(v.indexOf("TRIPLE") !== -1) return "TRIPLE";
+  if(v.indexOf("DUAL") !== -1) return "DUAL";
+  if(v.indexOf("SINGLE") !== -1) return "SINGLE";
+  return "OTHER";
+}
+
+function normalizeIndexerEnum(raw){
+  var v = String(raw || "").toUpperCase();
+  if(v.indexOf("VERT") !== -1) return "VERTICAL";
+  if(v.indexOf("SPINDEX") !== -1) return "SPINDEXER";
+  if(v.indexOf("ROLLER") !== -1) return "ROLLER";
+  if(v.indexOf("BELT") !== -1) return "BELT";
+  if(v.indexOf("GRAV") !== -1) return "GRAVITY";
+  return "ROLLER";
+}
+
+function parseAutoRoutineActions(raw){
+  var txt = String(raw || "").toUpperCase();
+  var actions = [];
+  if(txt.indexOf("DEPOT") !== -1) actions.push("COLLECT_DEPOT");
+  if(txt.indexOf("OUTPOST") !== -1) actions.push("COLLECT_OUTPOST");
+  if(txt.indexOf("LEFT BUMP") !== -1 || txt.indexOf("L BUMP") !== -1) actions.push("CROSS_LEFT_BUMP");
+  if(txt.indexOf("LEFT TRENCH") !== -1 || txt.indexOf("L TRENCH") !== -1) actions.push("CROSS_LEFT_TRENCH");
+  if(txt.indexOf("RIGHT BUMP") !== -1 || txt.indexOf("R BUMP") !== -1) actions.push("CROSS_RIGHT_BUMP");
+  if(txt.indexOf("RIGHT TRENCH") !== -1 || txt.indexOf("R TRENCH") !== -1) actions.push("CROSS_RIGHT_TRENCH");
+  if(txt.indexOf("SHOOT") !== -1) actions.push("SHOOT");
+  if(txt.indexOf("CLIMB") !== -1) actions.push("CLIMB");
+  return actions;
+}
+
+function buildPitReportFormData(pitData){
+  var activeEvt = localStorage.getItem("@scanner_active_event") || "2026A";
+  var eventCode = normalizeTeamStatsEventCode(activeEvt);
+  if(!eventCode || eventCode.length !== 5) eventCode = "2026A";
+
+  var teamNumber = parseInt(pitData.teamNumber, 10);
+  if(!teamNumber || isNaN(teamNumber)) throw new Error("Invalid team number");
+
+  var weight = Number(pitData.weightLbs || pitData.weight);
+  if(!weight || weight <= 0) weight = 1;
+
+  var estimatedBps = Number(pitData.estimatedBps);
+  var driverEvents = parseInt(pitData.driverEvents || pitData.driverExperience, 10);
+  if(isNaN(driverEvents) || driverEvents < 0) driverEvents = 0;
+
+  var climbLevels = Array.isArray(pitData.climbLevels) ? pitData.climbLevels : [];
+  var climbLevel = parseInt(pitData.climbLevel, 10) || 0;
+  climbLevels.forEach(function(l){
+    var n = parseInt(l, 10) || 0;
+    if(n > climbLevel) climbLevel = n;
+  });
+  if(climbLevel < 0) climbLevel = 0;
+  if(climbLevel > 3) climbLevel = 3;
+
+  var routineActions = parseAutoRoutineActions(pitData.autoRoutines);
+  var expectedHubScores = parseInt((String(pitData.autoRoutines || "").match(/\d+/) || ["0"])[0], 10) || 0;
+
+  var form = new FormData();
+  form.append("createdAt", pitData.createdAt || new Date().toISOString());
+  form.append("eventCode", eventCode);
+  form.append("teamNumber", String(teamNumber));
+  form.append("drivetrain", normalizeDrivetrainEnum(pitData.drivetrain));
+  form.append("shooter", normalizeShooterEnum(pitData.shooter, pitData.hasDrumShooter));
+  form.append("estimatedBps", estimatedBps > 0 ? String(estimatedBps) : "");
+  form.append("indexer", normalizeIndexerEnum(pitData.indexer));
+  form.append("hopperCapacity", "1");
+  form.append("climbLevel", String(climbLevel));
+  form.append("canPass", (pitData.canPass || pitData.canFerry) ? "true" : "false");
+  form.append("canDefend", /defen/i.test(String(pitData.notes || "")) ? "true" : "false");
+  form.append("canCrossBump", /bump/i.test(String(pitData.autoRoutines || "") + " " + String(pitData.notes || "")) ? "true" : "false");
+  form.append("canCrossTrench", /trench/i.test(String(pitData.autoRoutines || "") + " " + String(pitData.notes || "")) ? "true" : "false");
+  form.append("driverEvents", String(driverEvents));
+  form.append("weightLbs", String(weight));
+  form.append("notes", String(pitData.notes || "").substring(0, 400));
+  form.append("photo", "");
+
+  form.append("autoRoutines", JSON.stringify({
+    startingPosition: "CENTER",
+    actions: routineActions,
+    expectedHubScores: expectedHubScores
+  }));
+
+  return form;
+}
+
+function uploadPitReportToBackend(pitData){
+  var body = buildPitReportFormData(pitData);
+  return fetchWithAuth(API_URL + "/pit-report", {
+    method: "POST",
+    body: body
+  }).then(function(res){
+    if(res.status === 201) return null;
+    return res.json().catch(function(){ return {}; }).then(function(err){
+      if(res.status === 409 || (err && err.code === "PIT_REPORT_ALREADY_EXISTS")) return null;
+      var code = err && err.code ? (" [" + err.code + "]") : "";
+      throw new Error("HTTP " + res.status + code);
+    });
+  });
+}
+
+function syncPitReportsToBackend(){
+  if(!AUTH_TOKEN || AUTH_TOKEN === "offline-demo-token"){
+    alert("Connect to backend first.");
+    return;
+  }
+
+  var reports = JSON.parse(localStorage.getItem("@scanner_pit_reports") || "[]");
+  if(!reports.length){
+    alert("No local pit reports to sync.");
+    return;
+  }
+
+  log("Syncing " + reports.length + " pit report(s) to backend...", "info");
+
+  var ok = 0;
+  var failed = 0;
+  var chain = Promise.resolve();
+  reports.forEach(function(r){
+    chain = chain.then(function(){
+      return uploadPitReportToBackend(r)
+        .then(function(){ ok++; })
+        .catch(function(err){
+          failed++;
+          log("Pit sync failed for Team " + r.teamNumber + ": " + err.message, "error");
+        });
+    });
+  });
+
+  chain.then(function(){
+    log("Pit report sync finished. Success: " + ok + ", Failed: " + failed, failed ? "error" : "success");
+  });
 }
 
 function printAllPitReports() {
@@ -2193,7 +2445,7 @@ function renderDetailedTeamStats(data) {
       "<div style='display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px; font-size:13px; color:#ccc;'>" +
         "<div style='background:#222; padding:10px; border-radius:8px;'>" +
         "<h5 style='color:#0a84ff; margin:0 0 5px;'>Autonomous</h5>" +
-        "<div><b>Auto Hub:</b> " + noNull(data.auto?.avgHubscores) + "</div>" +
+        "<div><b>Auto Hub:</b> " + noNull((data.auto && (data.auto.avgHubScores != null ? data.auto.avgHubScores : data.auto.avgHubscores))) + "</div>" +
         "<div><b>Auto Passes:</b> " + noNull(data.auto?.avgPasses) + "</div>" +
         "<div><b>Auto Climb Lvl:</b> " + noNull(data.auto?.avgLevel) + "</div>" +
       "</div>" +
@@ -2285,7 +2537,7 @@ function updateTeamTimeline(overrideTeam) {
     else if (m.notes && m.notes.includes("Level 2")) ep = 2;
     else if (m.notes && m.notes.includes("Level 1")) ep = 1;
     var fVol = parseInt((m.teleop && m.teleop.passes)||0, 10) || parseInt(p.ferry||0, 10);
-    var incapSec = parseInt(m.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+    var incapSec = parseInt(m.secondsIncapacitated || m.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
     
     var autoPts = aHubs * 2;
     var totalPts = autoPts + tHubs + (ep * 10);
@@ -2622,12 +2874,12 @@ function computeStatsFromMatches(matches){
     totEndPts += endPts;
     if(endPts > maxEndPts) maxEndPts = endPts;
     
-    totIncap     += parseInt(r.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+    totIncap     += parseInt(r.secondsIncapacitated || r.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
 
     if(r.overBump  || p.bump)   bumpCount++;
     if(r.underTrench || p.trench) trenchCount++;
     if(t.defended || p.defended) defendedCount++;
-    if(r.secondsDead > 0 || p.dead) deadCount++;
+    if((r.secondsIncapacitated > 0) || (r.secondsDead > 0) || p.dead) deadCount++;
 
     var start = (r.startingPosition || p.start || "Unknown").toString().toLowerCase();
     if(start.indexOf("left") !== -1) startPosCounts.Left++;
@@ -2965,7 +3217,7 @@ function buildTeamStatsFromReports(matches){
     minorF += safeNum(r.minorFouls);
     majorF += safeNum(r.majorFouls);
     if(r.inMatch === false) missed++;
-    if(safeNum(r.secondsDead) > 0) incap++;
+    if(safeNum(r.secondsIncapacitated || r.secondsDead) > 0) incap++;
 
     if(!drivetrain && r.drivetrain) drivetrain = r.drivetrain;
     if(!shooter && r.shooter) shooter = r.shooter;
@@ -3096,6 +3348,10 @@ function fetchTeamStats(){
 }
 
 function renderTeamStatsCard(teamNum, eventCode, stats){
+  var autoAvgHubScores = stats && stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : null;
+  var defendedRatio = stats && stats.teleop ? stats.teleop.avgDefended : null;
+  var defendedPercent = defendedRatio == null ? null : (defendedRatio <= 1 ? defendedRatio * 100 : defendedRatio);
+
   var html = "<div style='text-align:left'>" +
     "<h2 style='margin:0 0 8px;color:#0a84ff'>Team " + teamNum + " - " + eventCode.toUpperCase() + "</h2>" +
     "<p style='color:#aaa;margin:0 0 20px;font-size:13px'>Detailed match statistics from backend</p>";
@@ -3121,7 +3377,7 @@ function renderTeamStatsCard(teamNum, eventCode, stats){
   html += "<div style='background:#252525;padding:15px;border-radius:8px;margin-bottom:15px'>" +
     "<h3 style='margin:0 0 12px;font-size:14px;color:#ff9500'>Auto Phase</h3>" +
     "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:15px;font-size:12px'>" +
-      "<div><b>Avg Hub Scores</b><br>" + formatNum(stats.auto && stats.auto.avgHubScores) + "</div>" +
+      "<div><b>Avg Hub Scores</b><br>" + formatNum(autoAvgHubScores) + "</div>" +
       "<div><b>Avg Level</b><br>" + formatNum(stats.auto && stats.auto.avgLevel, 2) + "</div>" +
       "<div><b>Avg Passes</b><br>" + formatNum(stats.auto && stats.auto.avgPasses) + "</div>" +
     "</div></div>";
@@ -3134,7 +3390,7 @@ function renderTeamStatsCard(teamNum, eventCode, stats){
       "<div><b>Hub Stdev</b><br>" + formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.stdev) + "</div>" +
       "<div><b>Avg When Defended</b><br>" + formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avgWhenDefended) + "</div>" +
       "<div><b>Avg Passes</b><br>" + formatNum(stats.teleop && stats.teleop.passes && stats.teleop.passes.avg) + "</div>" +
-      "<div><b>Defended Rate</b><br>" + formatNum(stats.teleop && stats.teleop.avgDefended, 2) + "% (" + (stats.teleop && Math.round(stats.teleop.avgDefended) || "?") + " matches)</div>" +
+      "<div><b>Defended Rate</b><br>" + formatNum(defendedPercent, 2) + "%</div>" +
     "</div></div>";
   
   // Endgame & Fouls

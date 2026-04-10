@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -12,12 +13,11 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  ToastAndroid,
   TouchableOpacity,
-  View,
-  ToastAndroid
+  View
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import { useEffect, useState } from "react";
 
 const BACKEND_INDEXERS = ["VERTICAL", "SPINDEXER", "ROLLER", "BELT", "GRAVITY"];
 const BACKEND_SHOOTERS = [
@@ -74,6 +74,17 @@ const mapShooterToBackend = (value: string) => {
   if (value === "Drum") return BACKEND_SHOOTERS[6];
   if (value === "Other") return BACKEND_SHOOTERS[7];
   return BACKEND_SHOOTERS[0];
+};
+
+const mapIndexerToBackend = (value: string) => {
+  const upper = String(value || "").toUpperCase();
+  if (BACKEND_INDEXERS.includes(upper)) return upper;
+  if (upper.includes("VERT")) return "VERTICAL";
+  if (upper.includes("SPINDEX")) return "SPINDEXER";
+  if (upper.includes("ROLLER")) return "ROLLER";
+  if (upper.includes("BELT")) return "BELT";
+  if (upper.includes("GRAV")) return "GRAVITY";
+  return "VERTICAL";
 };
 
 const mapStartingPositionToBackend = (value: string) => {
@@ -149,7 +160,7 @@ const buildPitFormData = (report: any) => {
   formData.append("teamNumber", clampPositiveInt(report.teamNumber, 1).toString());
   formData.append("drivetrain", mapDrivetrainToBackend(report.drivetrain));
   formData.append("shooter", mapShooterToBackend(report.shooter));
-  formData.append("indexer", report.indexer || "VERTICAL");
+  formData.append("indexer", mapIndexerToBackend(report.indexer));
   formData.append("estimatedBps", normalizeNumericString(report.estimatedBps, ""));
   formData.append("hopperCapacity", clampPositiveInt(report.hopperCapacity, 1).toString());
   formData.append("climbLevel", String(Math.min(3, Math.max(0, parseInt(report.climbLevel || "0", 10) || 0))));
@@ -970,7 +981,7 @@ export default function PitScoutingView({
             ))}
           </View>
 
-          <Text style={styles.label}>Pit Hardware</Text>
+          <Text style={styles.label}>Indexer (Backend Enum)</Text>
           <View style={styles.row}>
             {BACKEND_INDEXERS.map((indexer) => (
               <TouchableOpacity

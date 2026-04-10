@@ -1324,20 +1324,28 @@ export default function App() {
       form.wasDefended                                           // 25
     ].join('|');
 
+    const normalizedMatchNumber = Math.max(1, parseInt(form.matchNumber || "1", 10) || 1);
+    const normalizedTeamNumber = Math.max(1, parseInt(form.teamNumber || "1", 10) || 1);
+    const normalizedMinorFouls = Math.max(0, parseInt(String(form.fouls), 10) || 0);
+    const normalizedMajorFouls = Math.max(0, parseInt(String(form.majorFouls), 10) || 0);
+    const normalizedIncapSeconds = Math.max(0, parseInt(effectiveDeadTime, 10) || 0);
+    const normalizedShootingConfidence = Math.min(5, Math.max(0, parseInt(String(form.shootingConfidence), 10) || 0));
+
     // Attempt to submit to backend real-time matching the required schema strictly
     const reportPayload = {
       createdAt: new Date().toISOString(),
       eventCode: form.eventCode.substring(0, 5).padEnd(5, "A"),
       matchType: form.matchType === "Play" ? "PLAYOFF" : "QUALIFICATION",
-      matchNumber: parseInt(form.matchNumber || "1", 10),
+      matchNumber: normalizedMatchNumber,
       alliance: station && station.startsWith('Blue') ? 'BLUE' : 'RED',
-      teamNumber: parseInt(form.teamNumber || "1", 10),
+      teamNumber: normalizedTeamNumber,
       inMatch: true,
       notes: fullNotes.substring(0, 400),
-      minorFouls: form.fouls,
-      majorFouls: form.majorFouls,
-      secondsIncapacitated: parseInt(effectiveDeadTime, 10),
-      shootingConfidence: form.shootingConfidence,
+      minorFouls: normalizedMinorFouls,
+      majorFouls: normalizedMajorFouls,
+      secondsIncapacitated: normalizedIncapSeconds,
+      secondsDead: normalizedIncapSeconds,
+      shootingConfidence: normalizedShootingConfidence,
       auto: {
         notes: safeAutoNotes.substring(0, 400),
         hubScores: form.autoMake,
@@ -1375,7 +1383,7 @@ export default function App() {
     );
 
     try {
-      if (token) {
+      if (token && token !== "offline-token") {
         let res = await fetch(`${apiUrl}/report`, {
           method: 'POST',
           headers: {

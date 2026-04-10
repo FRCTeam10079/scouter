@@ -256,6 +256,7 @@ function enqueuePendingReport(payload) {
 
 function normalizeAutoClimbForBackend(value) {
   const v = String(value || "").toUpperCase();
+  if (v === "FAILED") return "FAILED";
   if (v === "LEVEL1") return "LEVEL1";
   return "NONE";
 }
@@ -1214,23 +1215,73 @@ function handleRawQR(raw) {
 
 function processPitReport(str) {
   const p = str.split("|");
-  const pitData = {
-    teamNumber: p[1] || "Unknown",
-    drivetrain: p[2] || "",
-    shooter: p[3] || "",
-    hasDrumShooter: p[4] === "1",
-    estimatedBps: p[5] || "",
-    driverExperience: p[6] || "",
-    weight: p[7] || "",
-    width: p[8] || "",
-    length: p[9] || "",
-    autoRoutines: p[10] || "",
-    canFerry: p[11] === "1",
-    canClimb: p[12] === "1",
-    climbLevels: p[13] ? p[13].split(",").map(Number) : [],
-    notes: p[14] || "",
-    createdAt: new Date().toISOString(),
+  const knownIndexers = {
+    VERTICAL: true,
+    SPINDEXER: true,
+    ROLLER: true,
+    BELT: true,
+    GRAVITY: true,
   };
+
+  const indexerToken = String(p[4] || "").toUpperCase();
+  const isNewPitFormat = !!knownIndexers[indexerToken];
+  let pitData;
+
+  if (isNewPitFormat) {
+    const levelsNew = p[15] ? p[15].split(",").filter(Boolean).map(Number) : [];
+    let topClimbNew = 0;
+    levelsNew.forEach((l) => {
+      const n = parseInt(l, 10) || 0;
+      if (n > topClimbNew) topClimbNew = n;
+    });
+
+    pitData = {
+      teamNumber: p[1] || "Unknown",
+      drivetrain: p[2] || "",
+      shooter: p[3] || "",
+      indexer: p[4] || "VERTICAL",
+      estimatedBps: p[5] || "",
+      driverEvents: p[6] || "0",
+      driverExperience: p[6] || "0",
+      weightLbs: p[7] || "",
+      weight: p[7] || "",
+      autoRoutines: p[8] || "",
+      canPass: p[9] === "1",
+      canFerry: p[9] === "1",
+      canDefend: p[10] === "1",
+      canCrossBump: p[11] === "1",
+      canCrossTrench: p[12] === "1",
+      hopperCapacity: p[13] || "1",
+      canClimb: p[14] === "1",
+      climbLevels: levelsNew,
+      climbLevel: topClimbNew,
+      notes: p[16] || "",
+      hasDrumShooter: String(p[3] || "").toUpperCase().includes("DRUM"),
+      createdAt: new Date().toISOString(),
+    };
+  } else {
+    pitData = {
+      teamNumber: p[1] || "Unknown",
+      drivetrain: p[2] || "",
+      shooter: p[3] || "",
+      hasDrumShooter: p[4] === "1",
+      estimatedBps: p[5] || "",
+      driverExperience: p[6] || "",
+      driverEvents: p[6] || "",
+      weight: p[7] || "",
+      weightLbs: p[7] || "",
+      width: p[8] || "",
+      length: p[9] || "",
+      autoRoutines: p[10] || "",
+      canFerry: p[11] === "1",
+      canPass: p[11] === "1",
+      canClimb: p[12] === "1",
+      climbLevels: p[13] ? p[13].split(",").filter(Boolean).map(Number) : [],
+      notes: p[14] || "",
+      indexer: p[15] || "",
+      createdAt: new Date().toISOString(),
+    };
+  }
 
   let existing = JSON.parse(
     localStorage.getItem("@scanner_pit_reports") || "[]",
@@ -1768,7 +1819,7 @@ function updateTeamTimeline() {
     else if (m.notes && m.notes.includes("Level 2")) ep = 2;
     else if (m.notes && m.notes.includes("Level 1")) ep = 1;
     var fVol = parseInt((m.teleop && m.teleop.passes)||0, 10) || parseInt(p.ferry||0, 10);
-    var incapSec = parseInt(m.secondsIncapacitated || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
+    var incapSec = parseInt(m.secondsIncapacitated || m.secondsDead || p.deadTime, 10) || parseInt(p.climbTime, 10) || 0;
 
     var autoPts = aHubs * 2;
     var totalPts = autoPts + tHubs + (ep * 10);
@@ -2140,13 +2191,13 @@ function computeStatsFromMatches(matches) {
     if (endPts > maxEndPts) maxEndPts = endPts;
 
     totIncap +=
-      parseInt(r.secondsIncapacitated || p.deadTime, 10) ||
+      parseInt(r.secondsIncapacitated || r.secondsDead || p.deadTime, 10) ||
       parseInt(p.climbTime, 10) ||
       0;
 
     if (r.overBump || p.bump) bumpCount++;
     if (r.underTrench || p.trench) trenchCount++;
-    if (r.secondsIncapacitated > 0 || p.dead) deadCount++;
+    if ((r.secondsIncapacitated > 0) || (r.secondsDead > 0) || p.dead) deadCount++;
 
     const start = (r.startingPosition || p.start || "Unknown")
       .toString()
