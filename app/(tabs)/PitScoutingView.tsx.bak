@@ -139,7 +139,7 @@ const buildAutoRoutinesPayload = (report: any) => {
 
 const buildPitFormData = (report: any) => {
   const formData = new FormData();
-  const eventCode = normalizeNumericString(report.eventCode || "2026A", "2026A")
+  const eventCode = normalizeNumericString(report.eventCode || "pncmp", "pncmp")
     .substring(0, 5)
     .padEnd(5, "A");
 
@@ -180,7 +180,7 @@ const buildLocalPitRecord = (report: any, photoBase64: string, photoUri: string,
   id: Date.now().toString(),
   createdAt: new Date().toISOString(),
   syncState: "local",
-  eventCode: normalizeNumericString(report.eventCode || "2026A", "2026A").substring(0, 5).padEnd(5, "A"),
+  eventCode: normalizeNumericString(report.eventCode || "pncmp", "pncmp").substring(0, 5).padEnd(5, "A"),
   teamNumber: report.teamNumber,
   drivetrain: report.drivetrain,
   shooter: report.shooter,
@@ -247,7 +247,7 @@ export default function PitScoutingView({
   const [showQRFor, setShowQRFor] = useState<any>(null);
 
   const [form, setForm] = useState({
-    eventCode: "2026A",
+    eventCode: "pncmp",
     teamNumber: "",
     drivetrain: "Swerve",
     shooter: "Single Shooter",
@@ -951,7 +951,7 @@ export default function PitScoutingView({
           <TextInput
             style={styles.input}
             autoCapitalize="characters"
-            placeholder="2026A"
+            placeholder="pncmp"
             placeholderTextColor="#666"
             value={form.eventCode}
             onChangeText={(t) => setForm({ ...form, eventCode: t.toUpperCase().slice(0, 5) })}

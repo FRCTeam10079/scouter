@@ -108,6 +108,10 @@ tr:hover{background:rgba(255,255,255,.05)}
       <div style="display:grid;grid-template-columns:1fr;gap:10px">
         <button onclick="printAllPitReports()" style="background:#8a2be2">Print Scanned Pit Reports</button>
         <button onclick="syncPitReportsToBackend()" style="background:#0ea5e9">Sync Pit Reports to Backend</button>
+        <div style="display:flex;gap:5px;width:100%">
+          <button onclick="exportAllData()" style="background:#f59e0b;flex:1;margin:0;">Export (JSON)</button>
+          <button onclick="exportAllDataCSV()" style="background:#ef4444;flex:1;margin:0;">Export (CSV)</button>
+        </div>
       </div>
       <div style="background:#252525;padding:20px;border-radius:8px"> 
         <h4>Single Team Report</h4>
@@ -118,7 +122,7 @@ tr:hover{background:rgba(255,255,255,.05)}
       <div style="background:#252525;padding:20px;border-radius:8px">
         <h4>Team Stats Deep Dive</h4>
         <p style="font-size:12px;color:#aaa">Detailed backend statistics (Auto, Teleop, Endgame, EPA).</p>
-        <input id="team-stats-team-input" type="number" placeholder="Team #" style="font-size:16px;text-align:center;margin-bottom:10px">
+        <input id="team-stats-team-input" type="text" placeholder="Team # or list (e.g. 254, 1678, 971)" style="font-size:16px;text-align:center;margin-bottom:10px">
         <input id="team-stats-event-input" type="text" placeholder="Event Code (e.g. 2024misal)" style="font-size:14px;text-align:center;margin-bottom:10px">
         <button onclick="fetchTeamStats()">Get Team Stats</button>
       </div>
@@ -160,7 +164,7 @@ tr:hover{background:rgba(255,255,255,.05)}
       <button onclick="closeTeamStatsModal()" style="position:absolute;top:10px;right:10px;background:#444;padding:8px 12px;border-radius:6px;width:auto;margin:0">✕ Close</button>
       <div id="team-stats-content" style="margin-top:30px"></div>
       <div style="margin-top:20px;display:flex;gap:10px;justify-content:center">
-        <button onclick="window.print()" style="background:#22c55e">Print Report</button>
+        <button onclick="printTeamStatsReport()" style="background:#22c55e">Print Report</button>
         <button onclick="closeTeamStatsModal()" style="background:#444">Close</button>
       </div>
     </div>
@@ -226,8 +230,11 @@ tr:hover{background:rgba(255,255,255,.05)}
     <div class="alliance-card" style="margin-bottom:20px">
       <h3 style="margin-top:0">Team Deep-Dive & Match Timeline</h3>
       <div style="display:flex;gap:10px;margin-bottom:15px">
-        <input id="alliance-search-input" type="number" placeholder="Enter Team # (e.g. 254)" style="width:200px;margin:0">
+        <input id="alliance-search-input" type="text" placeholder="Enter Team # or list (e.g. 254, 1678, 971)" style="width:260px;margin:0">
         <button onclick="renderTeamDeepDive()" style="width:auto;margin:0">Analyze Team</button>
+        <button onclick="printAllDeepDiveStats()" style="width:auto;margin:0;background:#22c55e">Print All Deep Dive</button>
+        <button onclick="toggleDeepDiveDebug()" style="width:auto;margin:0;background:#444">Toggle Debug</button>
+        <div id="alliance-debug-status" style="display:flex;align-items:center;font-size:12px;color:#888">Debug: OFF</div>
       </div>
       <div id="alliance-deep-dive-content" style="display:none;background:#1a1a1a;padding:15px;border-radius:6px">
       </div>
@@ -342,10 +349,16 @@ var OFFLINE_QUEUE_KEY = "@scanner_pending_reports_v1";
 var LOCAL_RECENT_REPORTS_KEY = "@scanner_recent_reports_v1";
 var TBA_EVENT_KEY_STORAGE = "@scanner_tba_event_key_v1";
 var TBA_SCHEDULE_CACHE_PREFIX = "@scanner_tba_schedule_";
+var TEAM_STATS_ROUTE_TEMPLATE_KEY = "@scanner_team_stats_route_template_v1";
+var OFFLINE_SYNC_BASE_BACKOFF_MS = 30000;
+var OFFLINE_SYNC_MAX_BACKOFF_MS = 15 * 60 * 1000;
+var OFFLINE_SYNC_MAX_ATTEMPTS = 8;
+var DEEP_DIVE_DEBUG_KEY = "@scanner_debug_deep_dive_v1";
 
 // ─── STATE ───────────────────────────────────────────────────────────────────
 var AUTH_TOKEN = "";
 var REFRESH_TOKEN = "";
+var refreshInFlightPromise = null;
 var cameraStream    = null;
 var scanVideoEl     = null;
 var scanCanvasEl    = null;
@@ -383,6 +396,9 @@ var advancedScanEnabled = true;
 var qrLibInitInFlight = false;
 var qrLibReadyCallbacks = [];
 var pendingCameraStart = false;
+var deepDiveDebugEnabled = localStorage.getItem(DEEP_DIVE_DEBUG_KEY) === "1";
+var deepDiveTeamCache = Object.create(null);
+var statboticsEventCacheByEvent = Object.create(null);
 
 var highestScannedMatch = parseInt(localStorage.getItem("@scanner_highest_match") || "0", 10);
 var notifiedMatches = JSON.parse(localStorage.getItem("@scanner_notified_matches") || "{}");
@@ -485,7 +501,27 @@ function loadRecentReports(){
   try {
     var raw = localStorage.getItem(LOCAL_RECENT_REPORTS_KEY);
     var parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    if(!Array.isArray(parsed)) return [];
+
+    // Migrate legacy rows that predate sync-state tracking.
+    var dirty = false;
+    var normalized = parsed.map(function(r){
+      if(!r || typeof r !== "object") return r;
+      if(!r.syncState){
+        r.syncState = "local";
+        if(!r.statusText || r.statusText === "Saved"){
+          r.statusText = "Local Cache Only";
+        }
+        dirty = true;
+      }
+      return r;
+    });
+
+    if(dirty){
+      try { localStorage.setItem(LOCAL_RECENT_REPORTS_KEY, JSON.stringify(normalized)); } catch(_e){}
+    }
+
+    return normalized;
   } catch(_e){
     return [];
   }
@@ -499,7 +535,7 @@ function saveRecentReports(items){
   }
 }
 
-function upsertRecentReport(payload, statusText){
+function upsertRecentReport(payload, statusText, syncState){
   var list = loadRecentReports();
   var key = String(payload.matchNumber) + "|" + String(payload.teamNumber);
   var idx = list.findIndex(function(x){
@@ -511,10 +547,17 @@ function upsertRecentReport(payload, statusText){
     teamNumber: payload.teamNumber,
     username: "Local",
     statusText: statusText || "Saved",
+    syncState: syncState || "local",
   };
   if (idx >= 0) list[idx] = row;
   else list.unshift(row);
   saveRecentReports(list.slice(0, 120));
+
+  // Only repaint from local cache when backend view is unavailable.
+  // Otherwise, a local repaint can temporarily overwrite confirmed backend rows.
+  if((!AUTH_TOKEN && !REFRESH_TOKEN) || AUTH_TOKEN === "offline-demo-token"){
+    renderTableFromLocalCache();
+  }
 }
 
 function renderTableFromLocalCache(){
@@ -527,8 +570,12 @@ function renderTableFromLocalCache(){
   tableBody.innerHTML = rows.map(function(r){
     var mn = r.matchNumber || r.id || "?";
     var sc = r.username || "Local";
-    var status = r.statusText || "Saved";
-    return "<tr><td style='font-weight:bold;color:#0a84ff'>Q" + mn + "</td><td style='font-weight:bold;font-size:1.1em'>" + r.teamNumber + "</td><td style='color:#aaa'>" + sc + "</td><td style='color:#ff9500'>[" + status + "]</td></tr>";
+    var syncState = r.syncState || "local";
+    var status = r.statusText || "Cached";
+    var statusColor = "#ff9500";
+    if(syncState === "backend") statusColor = "#4cd964";
+    else if(syncState === "queued") statusColor = "#ff453a";
+    return "<tr><td style='font-weight:bold;color:#0a84ff'>Q" + mn + "</td><td style='font-weight:bold;font-size:1.1em'>" + r.teamNumber + "</td><td style='color:#aaa'>" + sc + "</td><td style='color:" + statusColor + "'>[" + status + "]</td></tr>";
   }).join("");
 }
 
@@ -543,6 +590,29 @@ function log(msg, type){
 function clearLogs(){
   logsBox.innerHTML = "";
   log("Logs cleared.");
+}
+
+function debugDeepDive(msg, data){
+  if(!deepDiveDebugEnabled) return;
+  log("[DeepDive] " + msg, "info");
+  if(typeof console !== "undefined"){
+    if(data !== undefined) console.log("[DeepDive]", msg, data);
+    else console.log("[DeepDive]", msg);
+  }
+}
+
+function refreshDeepDiveDebugUi(){
+  var badge = $("alliance-debug-status");
+  if(!badge) return;
+  badge.textContent = deepDiveDebugEnabled ? "Debug: ON" : "Debug: OFF";
+  badge.style.color = deepDiveDebugEnabled ? "#22c55e" : "#888";
+}
+
+function toggleDeepDiveDebug(){
+  deepDiveDebugEnabled = !deepDiveDebugEnabled;
+  localStorage.setItem(DEEP_DIVE_DEBUG_KEY, deepDiveDebugEnabled ? "1" : "0");
+  refreshDeepDiveDebugUi();
+  log("Deep Dive debug " + (deepDiveDebugEnabled ? "enabled" : "disabled") + ".", "info");
 }
 
 function submitManualRawQr(){
@@ -675,7 +745,11 @@ function enqueuePendingReport(payload){
 
   pendingReports.push({
     payload: payload,
-    queuedAt: new Date().toISOString()
+    queuedAt: new Date().toISOString(),
+    attempts: 0,
+    nextRetryAt: 0,
+    lastStatus: 0,
+    lastError: ""
   });
   savePendingReports();
   return true;
@@ -697,7 +771,7 @@ function sanitizeReportPayloadForBackend(payload){
     out.createdAt = new Date(out.createdAt).toISOString();
   }
 
-  out.eventCode = String(out.eventCode || "2026A").substring(0,5).padEnd(5, "A");
+  out.eventCode = String(out.eventCode || "").substring(0,5).padEnd(5, "A")
   out.matchType = out.matchType || "QUALIFICATION";
   out.alliance = out.alliance === "BLUE" ? "BLUE" : "RED";
   out.inMatch = out.inMatch !== false;
@@ -743,10 +817,47 @@ function flushPendingReports(){
   var queue = pendingReports.slice();
   var nextPending = [];
   var savedCount = 0;
+  var skippedCount = 0;
+  var droppedCount = 0;
+  var nowTs = Date.now();
+
+  function ensureQueueMeta(item){
+    if(!item || typeof item !== "object") return;
+    if(typeof item.attempts !== "number" || item.attempts < 0) item.attempts = 0;
+    if(typeof item.nextRetryAt !== "number" || item.nextRetryAt < 0) item.nextRetryAt = 0;
+    if(typeof item.lastStatus !== "number" || item.lastStatus < 0) item.lastStatus = 0;
+    if(typeof item.lastError !== "string") item.lastError = "";
+  }
+
+  function scheduleRetry(item, status, errMsg){
+    ensureQueueMeta(item);
+    item.attempts += 1;
+    item.lastStatus = Number(status || 0);
+    item.lastError = String(errMsg || "").substring(0, 180);
+
+    var exponent = Math.max(0, item.attempts - 1);
+    var delay = OFFLINE_SYNC_BASE_BACKOFF_MS * Math.pow(2, exponent);
+    if(delay > OFFLINE_SYNC_MAX_BACKOFF_MS) delay = OFFLINE_SYNC_MAX_BACKOFF_MS;
+    item.nextRetryAt = Date.now() + delay;
+  }
 
   var chain = Promise.resolve();
   queue.forEach(function(item){
     chain = chain.then(function(){
+      ensureQueueMeta(item);
+
+      if(item.nextRetryAt && item.nextRetryAt > nowTs){
+        skippedCount++;
+        nextPending.push(item);
+        return;
+      }
+
+      if(item.attempts >= OFFLINE_SYNC_MAX_ATTEMPTS){
+        droppedCount++;
+        log("Dropped queued report after repeated sync failures (match " + (item.payload && item.payload.matchNumber || "?") + ", team " + (item.payload && item.payload.teamNumber || "?") + ").", "error");
+        return;
+      }
+
       var sanitizedPayload = sanitizeReportPayloadForBackend(item.payload);
       item.payload = sanitizedPayload;
       return fetchWithAuth(API_URL + "/report", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(sanitizedPayload)
@@ -754,26 +865,45 @@ function flushPendingReports(){
       .then(function(res){
         if(res.status === 201) {
           savedCount++;
+          upsertRecentReport(sanitizedPayload, "Saved (Backend)", "backend");
           return;
         }
         if(res.status === 400){
           // Invalid payloads should not stay in retry queue forever.
           log("Dropped invalid queued report (HTTP 400).", "error");
+          droppedCount++;
           return;
         }
-        return res.json()
-          .then(function(err){
-            if(err && err.message && err.message.indexOf("Unique") !== -1){
+        return res.text()
+          .then(function(bodyText){
+            var msg = bodyText || "";
+            try {
+              var parsed = JSON.parse(bodyText || "{}");
+              if(parsed && parsed.message) msg = String(parsed.message);
+            } catch(_e){
+              // Non-JSON response, keep text as-is.
+            }
+
+            if(msg && msg.indexOf("Unique") !== -1){
               savedCount++;
+              upsertRecentReport(sanitizedPayload, "Saved (Backend)", "backend");
               return;
             }
+
+            scheduleRetry(item, res.status, msg || ("HTTP " + res.status));
+            log("Queued report retry scheduled after HTTP " + res.status + " (match " + (sanitizedPayload.matchNumber || "?") + ", team " + (sanitizedPayload.teamNumber || "?") + ").", "error");
+            upsertRecentReport(sanitizedPayload, "Queued (Retry)", "queued");
             nextPending.push(item);
           })
           .catch(function(){
+            scheduleRetry(item, res.status, "HTTP " + res.status);
+            upsertRecentReport(sanitizedPayload, "Queued (Retry)", "queued");
             nextPending.push(item);
           });
       })
-      .catch(function(){
+      .catch(function(err){
+        scheduleRetry(item, 0, (err && err.message) || "Network/unknown error");
+        upsertRecentReport(sanitizedPayload, "Queued (Retry)", "queued");
         nextPending.push(item);
       });
     });
@@ -785,6 +915,12 @@ function flushPendingReports(){
     if(savedCount > 0){
       log("Synced " + savedCount + " offline report(s).", "success");
       fetchData();
+    }
+    if(skippedCount > 0){
+      log("Deferred " + skippedCount + " queued report(s) due to retry backoff.", "info");
+    }
+    if(droppedCount > 0){
+      log("Dropped " + droppedCount + " queued report(s) after validation/retry limits.", "error");
     }
   });
 }
@@ -1214,7 +1350,9 @@ function detectLikelyQrPresence(frame, w, h){
 function buildScanKey(rawChunk){
   var p = rawChunk.split("|");
   if(p.length < 3) return "RAW|" + rawChunk;
-  return [p[0] || "", p[1] || "", p[2] || ""].join("|");
+  // Normalize event code in dedupe keys so old QR payload event tags (e.g. 2026A)
+  // don't block scans now that this client is pinned to pncmp.
+  return ["pncmp", p[1] || "", p[2] || ""].join("|");
 }
 
 // ─── NAVIGATION ──────────────────────────────────────────────────────────────
@@ -1290,19 +1428,8 @@ function restoreSessionFromRefreshToken(){
   if(!REFRESH_TOKEN || REFRESH_TOKEN === "offline-demo-token") return;
 
   setConnected("RESTORING...", "#ff9500");
-  fetchTimeout(API_URL + "/auth/refresh", {
-    method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: REFRESH_TOKEN
-  })
-  .then(function(res){
-    if(res.status !== 201) throw new Error("refresh failed (" + res.status + ")");
-    return res.json();
-  })
-  .then(function(data){
-    AUTH_TOKEN = data.accessToken || data.token;
-    REFRESH_TOKEN = data.refreshToken || REFRESH_TOKEN;
-    localStorage.setItem("@scanner_refresh", REFRESH_TOKEN);
+  refreshAccessToken()
+  .then(function(){
     setConnected("CONNECTED", "#4cd964");
     log("Session restored.", "success");
     showScanner();
@@ -1319,6 +1446,39 @@ function showScanner(){
   loginBtn.textContent = "Connect to Backend";
   switchTab("scan");
   flushPendingReports();
+}
+
+function refreshAccessToken(){
+  if(refreshInFlightPromise) return refreshInFlightPromise;
+  if(!REFRESH_TOKEN || REFRESH_TOKEN === "offline-demo-token"){
+    return Promise.reject(new Error("No refresh token"));
+  }
+
+  refreshInFlightPromise = fetchTimeout(API_URL + "/auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: REFRESH_TOKEN
+  })
+  .then(function(refreshRes){
+    if(refreshRes.status !== 201) throw new Error("refresh failed (" + refreshRes.status + ")");
+    return refreshRes.json();
+  })
+  .then(function(data){
+    AUTH_TOKEN = data.accessToken || data.token || "";
+    REFRESH_TOKEN = data.refreshToken || REFRESH_TOKEN;
+    localStorage.setItem("@scanner_refresh", REFRESH_TOKEN);
+    return AUTH_TOKEN;
+  })
+  .catch(function(err){
+    AUTH_TOKEN = "";
+    setConnected("DISCONNECTED", "#666");
+    throw err;
+  })
+  .finally(function(){
+    refreshInFlightPromise = null;
+  });
+
+  return refreshInFlightPromise;
 }
 
 // ─── CAMERA ──────────────────────────────────────────────────────────────────
@@ -1591,27 +1751,18 @@ function showSuccess(match, team){
 function fetchWithAuth(url, options) {
   if (!options) options = {};
   if (!options.headers) options.headers = {};
-  options.headers["Authorization"] = "Bearer " + AUTH_TOKEN;
+  if(AUTH_TOKEN && AUTH_TOKEN !== "offline-demo-token"){
+    options.headers["Authorization"] = "Bearer " + AUTH_TOKEN;
+  }
 
   return fetchTimeout(url, options).then(function(res) {
     if (res.status === 401 && REFRESH_TOKEN && REFRESH_TOKEN !== "offline-demo-token") {
-      return fetchTimeout(API_URL + "/auth/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: REFRESH_TOKEN
-      }).then(function(refreshRes) {
-        if (refreshRes.status === 201) {
-          return refreshRes.json().then(function(data) {
-            AUTH_TOKEN = data.accessToken || data.token;
-            REFRESH_TOKEN = data.refreshToken;
-            localStorage.setItem("@scanner_refresh", REFRESH_TOKEN);
-            options.headers["Authorization"] = "Bearer " + AUTH_TOKEN;
-            return fetchTimeout(url, options); // Retry with new token
-          });
-        } else {
-          return res; // Pass through 401 if refresh failed
-        }
-      }).catch(function() { return res; });
+      return refreshAccessToken()
+        .then(function(){
+          options.headers["Authorization"] = "Bearer " + AUTH_TOKEN;
+          return fetchTimeout(url, options); // Retry with new token
+        })
+        .catch(function(){ return res; });
     }
     return res;
   });
@@ -1633,10 +1784,12 @@ function handleRawQR(raw){
 
     if(scanSavedKeys[key]){
       log("Duplicate scan blocked (already saved this session): " + key, "error");
+      renderTableFromLocalCache();
       return;
     }
     if(scanInFlightKeys[key]){
       log("Duplicate scan blocked (already processing): " + key, "info");
+      renderTableFromLocalCache();
       return;
     }
 
@@ -1826,9 +1979,9 @@ function parseAutoRoutineActions(raw){
 }
 
 function buildPitReportFormData(pitData){
-  var activeEvt = localStorage.getItem("@scanner_active_event") || "2026A";
+  var activeEvt = localStorage.getItem("@scanner_active_event") || "pncmp";
   var eventCode = normalizeTeamStatsEventCode(activeEvt);
-  if(!eventCode || eventCode.length !== 5) eventCode = "2026A";
+  if(!eventCode || eventCode.length !== 5) eventCode = "pncmp";
 
   var teamNumber = parseInt(pitData.teamNumber, 10);
   if(!teamNumber || isNaN(teamNumber)) throw new Error("Invalid team number");
@@ -1893,6 +2046,94 @@ function uploadPitReportToBackend(pitData){
       throw new Error("HTTP " + res.status + code);
     });
   });
+}
+
+function exportAllData() {
+  if (!AUTH_TOKEN || AUTH_TOKEN === "offline-demo-token") {
+    alert("Connect to backend first.");
+    return;
+  }
+  
+  // Try fetching all full reports using fetchAllFullReports to get detailed data
+  fetchAllFullReports()
+    .then((all) => {
+      if (!all || all.length === 0) {
+        alert("No reports found to export.");
+        return;
+      }
+      var dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(all, null, 2));
+      var dlAnchorElem = document.createElement('a');
+      dlAnchorElem.setAttribute("href", dataStr);
+      dlAnchorElem.setAttribute("download", "scouting_data_export.json");
+      document.body.appendChild(dlAnchorElem);
+      dlAnchorElem.click();
+      dlAnchorElem.remove();
+    })
+    .catch((err) => {
+      alert("Error fetching data: " + err.message);
+    });
+}
+
+function exportAllDataCSV() {
+  if (!AUTH_TOKEN || AUTH_TOKEN === "offline-demo-token") {
+    alert("Connect to backend first.");
+    return;
+  }
+  
+  fetchAllFullReports()
+    .then((all) => {
+      if (!all || all.length === 0) {
+        alert("No reports found to export.");
+        return;
+      }
+      
+      // Helper to flatten nested objects (like data: {...})
+      const flattenObj = (ob, prefix = '') => {
+        let result = {};
+        for (const i in ob) {
+          if (typeof ob[i] === 'object' && ob[i] !== null && !Array.isArray(ob[i])) {
+            const temp = flattenObj(ob[i], prefix + i + '_');
+            for (const j in temp) result[j] = temp[j];
+          } else {
+            result[prefix + i] = ob[i];
+          }
+        }
+        return result;
+      };
+
+      const flatData = all.map(row => flattenObj(row));
+      
+      // Get all unique headers
+      const headers = Array.from(new Set(flatData.reduce((acc, row) => acc.concat(Object.keys(row)), [])));
+      
+      let csvContent = headers.join(",") + "\n";
+      
+      flatData.forEach(row => {
+        let rowData = headers.map(header => {
+          let val = row[header];
+          if (val === null || val === undefined) val = "";
+          let valStr = String(val);
+          // Escape quotes and wrap in quotes if contains comma, quote, or newline
+          if (valStr.includes(",") || valStr.includes('"') || valStr.includes("\n")) {
+            valStr = '"' + valStr.replace(/"/g, '""') + '"';
+          }
+          return valStr;
+        });
+        csvContent += rowData.join(",") + "\n";
+      });
+
+      var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      var url = URL.createObjectURL(blob);
+      var dlAnchorElem = document.createElement('a');
+      dlAnchorElem.setAttribute("href", url);
+      dlAnchorElem.setAttribute("download", "scouting_data_export.csv");
+      document.body.appendChild(dlAnchorElem);
+      dlAnchorElem.click();
+      dlAnchorElem.remove();
+    })
+    .catch((err) => {
+      alert("Error fetching data: " + err.message);
+    });
 }
 
 function syncPitReportsToBackend(){
@@ -1995,7 +2236,7 @@ function processSingleMatch(str){
 
   var payload = {
     createdAt: new Date().toISOString(),
-    eventCode: (p[0] || "2026A").substring(0,5).padEnd(5,"A"),
+    eventCode: "pncmp",
     matchType: "QUALIFICATION",
     matchNumber: matchNum,
     alliance: p[21] ? (p[21].startsWith('Blue') ? 'BLUE' : 'RED') : 'RED',
@@ -2031,14 +2272,14 @@ function processSingleMatch(str){
   .then(function(res){
     if(res.status === 201){
       log("Saved Match " + p[1] + " (Team " + p[2] + ")", "success");
-      upsertRecentReport(payload, "Saved");
+      upsertRecentReport(payload, "Saved (Backend)", "backend");
       checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
     }
     return res.json().then(function(err){
       if(err.message && err.message.indexOf("Unique") !== -1){
         log("Match " + p[1] + " already saved. Skipped.", "info");
-        upsertRecentReport(payload, "Saved");
+        upsertRecentReport(payload, "Saved (Backend)", "backend");
         checkUpcomingPrint(parseInt(p[1], 10));
         return {match:p[1], team:p[2]};
       }
@@ -2046,7 +2287,9 @@ function processSingleMatch(str){
       var queued = enqueuePendingReport(payload);
       if(queued){
         log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
-        upsertRecentReport(payload, "Queued");
+        upsertRecentReport(payload, "Queued (Offline)", "queued");
+      } else {
+        upsertRecentReport(payload, "Local Cache Only", "local");
       }
       checkUpcomingPrint(parseInt(p[1], 10));
       return {match:p[1], team:p[2]};
@@ -2056,9 +2299,12 @@ function processSingleMatch(str){
     var queued = enqueuePendingReport(payload);
     if(queued){
       log("Offline save queued for Match " + p[1] + " (Team " + p[2] + ").", "info");
-      upsertRecentReport(payload, "Queued");
+      upsertRecentReport(payload, "Queued (Offline)", "queued");
     }
-    else { log("Already queued offline: Match " + p[1] + " (Team " + p[2] + ").", "info"); }
+    else {
+      log("Already queued offline: Match " + p[1] + " (Team " + p[2] + ").", "info");
+      upsertRecentReport(payload, "Local Cache Only", "local");
+    }
     checkUpcomingPrint(parseInt(p[1], 10));
     return {match:p[1], team:p[2]};
   });
@@ -2202,6 +2448,49 @@ function fetchStatboticsAllianceData() {
     });
 }
 
+function buildAllianceRosterFromPitReports(){
+  var pitReports = JSON.parse(localStorage.getItem("@scanner_pit_reports") || "[]");
+  if (!pitReports || pitReports.length === 0) return [];
+
+  var teamsMap = {};
+  pitReports.forEach(function(pr) {
+    if (!pr.teamNumber) return;
+    if (!teamsMap[pr.teamNumber]) teamsMap[pr.teamNumber] = [];
+    teamsMap[pr.teamNumber].push(pr);
+  });
+
+  var roster = [];
+  Object.keys(teamsMap).forEach(function(teamNum) {
+    var pitData = teamsMap[teamNum][0];
+    var pwr = 50;
+    if (pitData) {
+      if (pitData.estimatedBps) pwr += (parseInt(pitData.estimatedBps, 10) || 0) * 2;
+      if (pitData.canClimb) pwr += 15;
+      if (pitData.canPass) pwr += 8;
+      if (pitData.canDefend) pwr += 10;
+      if (pitData.canCrossTrench) pwr += 5;
+    }
+
+    roster.push({
+      teamNumber: parseInt(teamNum, 10),
+      opr: pwr,
+      avgScore: 0,
+      avgAuto: 0,
+      avgTele: 0,
+      avgFerry: 0,
+      climbRate: (pitData && pitData.canClimb) ? 100 : 0,
+      avgIncap: 0,
+      matches: 0,
+      dnpReasons: [],
+      goodFlags: pitData && pitData.canClimb ? ["Can Climb"] : [],
+      rawStats: {},
+      rawMatches: []
+    });
+  });
+
+  return roster;
+}
+
 // ─── ALLIANCE SELECTION ──────────────────────────────────────────────────────
 function loadAllianceData() {
   var statToggle = $("alliance-datasource-statbotics");
@@ -2267,11 +2556,43 @@ function loadAllianceData() {
       }
     });
 
+    if(roster.length === 0){
+      var pitRoster = buildAllianceRosterFromPitReports();
+      if(pitRoster.length > 0){
+        window.currentAllianceRoster = pitRoster;
+        window.allianceDataLoaded = true;
+        log("No backend match reports found. Loaded alliance matrix from local pit reports (" + pitRoster.length + " teams).", "info");
+        renderAllianceDashboard();
+        return;
+      }
+
+      window.currentAllianceRoster = [];
+      window.allianceDataLoaded = true;
+      $("alliance-recommended-list").innerHTML = "<div style='color:#666;padding:10px 0'>No data available.</div>";
+      $("alliance-dnp-list").innerHTML = "<div style='color:#666;padding:10px 0'>No data available.</div>";
+      $("predicted-alliances-grid").innerHTML = "<div style='color:#ff9500; padding:20px; text-align:center;'>No backend or pit data available yet. Scan matches or pit reports first.</div>";
+      $("alliance-roster-body").innerHTML = "<tr><td colspan='10' style='text-align:center;color:#ff9500'>No alliance data available yet. Scan matches or pit reports, then click Refresh Data.</td></tr>";
+      return;
+    }
+
     window.currentAllianceRoster = roster;
     window.allianceDataLoaded = true;
 
     renderAllianceDashboard();
-  }).catch(function(e){ log("Alliance fetch error: " + e.message, "error"); });
+  }).catch(function(e){ 
+    log("Alliance fetch error: " + e.message + ". Falling back to local pit reports.", "error"); 
+    var pitRoster = buildAllianceRosterFromPitReports();
+    if (pitRoster.length > 0) {
+      window.currentAllianceRoster = pitRoster;
+      log("Loaded alliance data from local pit reports (" + pitRoster.length + " teams).", "info");
+      renderAllianceDashboard();
+    } else {
+      log("No local pit reports available.", "error");
+      window.currentAllianceRoster = [];
+      $("predicted-alliances-grid").innerHTML = "<div style='color:#ff453a; padding:20px; text-align:center;'>No alliance data available. Check backend connection or add pit reports.</div>";
+      $("alliance-roster-body").innerHTML = "<tr><td colspan='10' style='text-align:center;color:#ff453a'>No alliance data available. Check backend connection or add pit reports.</td></tr>";
+    }
+  });
 }
 
 function renderAllianceDashboard() {
@@ -2350,6 +2671,10 @@ function sortAllianceTable(col, forceRetainDirection) {
   var asc = window.currentAllianceSort.asc;
   
   var roster = window.currentAllianceRoster.slice();
+  if(!roster.length){
+    $("alliance-roster-body").innerHTML = "<tr><td colspan='10' style='text-align:center;color:#ff9500'>No teams loaded yet. Click Refresh Data.</td></tr>";
+    return;
+  }
   roster.sort(function(a, b) {
     var valA = a[colKey];
     var valB = b[colKey];
@@ -2376,56 +2701,101 @@ function sortAllianceTable(col, forceRetainDirection) {
   $("alliance-roster-body").innerHTML = html;
 }
 
-function renderTeamDeepDive(overrideTeam) {
-  var teamInput = typeof overrideTeam === "number" ? overrideTeam : parseInt($("alliance-search-input").value, 10);
-  if(!teamInput || isNaN(teamInput)) return;
+function parseTeamListInput(raw){
+  var txt = String(raw || "").trim();
+  if(!txt) return [];
+  var seen = Object.create(null);
+  return txt.split(/[\s,]+/)
+    .map(function(t){ return parseInt(t, 10); })
+    .filter(function(n){ return !isNaN(n) && n > 0; })
+    .filter(function(n){
+      var k = String(n);
+      if(seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+}
 
-  var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
-  var panel = $("alliance-deep-dive-content");
-  if(!tm) {
-    // If the team isn't in our local scout roster, let's just attempt to fetch detailed from backend anyways
-    panel.style.display = "block";
-    panel.innerHTML = "<h4 style='margin:0 0 0px;color:#ff3b30;font-size:18px'>Team " + teamInput + " - No Local Data</h4>" + 
-                      "<div id='team-detailed-stats' style='margin-top:10px;'></div>";
-    fetchDetailedTeamInfo(teamInput);
-    return;
+function buildTeamOverviewHtml(teamInput, tm){
+  if(!tm){
+    return "<h4 style='margin:0 0 0px;color:#ff3b30;font-size:18px'>Team " + teamInput + " - No Local Data</h4>";
   }
 
   var issues = "";
   if(tm.dnpReasons.length > 0) issues = "<div style='color:#ff453a;margin-top:10px;padding:10px;background:rgba(255,69,58,0.1);border-radius:6px'><b>Flags:</b> " + tm.dnpReasons.join(" | ") + "</div>";
   else issues = "<div style='color:#34d399;margin-top:10px;padding:10px;background:rgba(52,211,153,0.1);border-radius:6px'><b>Flags:</b> None (Solid Performer)</div>";
 
-  panel.style.display = "block";
-  panel.innerHTML = 
-    "<h4 style='margin:0 0 10px;color:#0a84ff;font-size:18px'>Team " + tm.teamNumber + " Overview</h4>" +
-    "<div style='display:grid;grid-template-columns:1fr 1fr;gap:20px;font-size:14px'>" +
-      "<div><b>Power Rank:</b> "+tm.opr.toFixed(1)+"</div>" +
-      "<div><b>Avg Score:</b> "+tm.avgScore.toFixed(1)+" (High: "+tm.rawStats.maxScore+")</div>" +
-      "<div><b>Matches Played:</b> "+tm.matches+"</div>" +
-      "<div><b>Ferry Avg:</b> "+tm.avgFerry.toFixed(1)+"</div>" +
-    "</div>" + issues +
-    
-    "<div style='margin-top:25px; display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid #444; padding-bottom:5px;'>" +
-      "<h5 style='margin:0'>Match Performance Timeline</h5>" +
-      "<select id='alliance-metric-select' style='width:auto; padding:5px 10px; background:#2c2c2c; color:#fff; border:1px solid #444; border-radius:4px; font-size:12px; margin:0;' onchange='updateTeamTimeline()'>" +
-        "<option value='totalPts'>Total Points</option>" +
-        "<option value='autoHubs'>Auto Hubs</option>" +
-        "<option value='teleHubs'>Teleop Hubs</option>" +
-        "<option value='ferry'>Ferry Volume</option>" +
-        "<option value='incap'>Seconds Dead (Incap)</option>" +
-      "</select>" +
-    "</div>" +
-    "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>" +
-    "<div id='team-detailed-stats' style='margin-top:20px;'></div>";
+  return "<h4 style='margin:0 0 10px;color:#0a84ff;font-size:18px'>Team " + tm.teamNumber + " Overview</h4>" +
+    "<table style='width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px'>" +
+      "<thead><tr style='background:#222;color:#aaa'><th style='padding:8px;border:1px solid #333;text-align:left'>Metric</th><th style='padding:8px;border:1px solid #333;text-align:left'>Value</th></tr></thead>" +
+      "<tbody>" +
+        "<tr><td style='padding:8px;border:1px solid #333'>Power Rank</td><td style='padding:8px;border:1px solid #333'><b>"+tm.opr.toFixed(1)+"</b></td></tr>" +
+        "<tr><td style='padding:8px;border:1px solid #333'>Avg Score</td><td style='padding:8px;border:1px solid #333'>"+tm.avgScore.toFixed(1)+" (High: "+tm.rawStats.maxScore+")</td></tr>" +
+        "<tr><td style='padding:8px;border:1px solid #333'>Matches Played</td><td style='padding:8px;border:1px solid #333'>"+tm.matches+"</td></tr>" +
+        "<tr><td style='padding:8px;border:1px solid #333'>Ferry Avg</td><td style='padding:8px;border:1px solid #333'>"+tm.avgFerry.toFixed(1)+"</td></tr>" +
+      "</tbody>" +
+    "</table>" + issues;
+}
 
-  updateTeamTimeline(teamInput);
-  fetchDetailedTeamInfo(teamInput);
+function renderTeamDeepDive(overrideTeam) {
+  var teamList = [];
+  if(typeof overrideTeam === "number"){
+    teamList = [overrideTeam];
+  } else {
+    teamList = parseTeamListInput($("alliance-search-input").value);
+  }
+  if(!teamList.length) return;
+  debugDeepDive("Requested team list", teamList);
+  deepDiveTeamCache = Object.create(null);
+
+  var panel = $("alliance-deep-dive-content");
+  panel.style.display = "block";
+
+  if(teamList.length === 1){
+    var teamInput = teamList[0];
+    var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamInput; });
+
+    panel.innerHTML =
+      buildTeamOverviewHtml(teamInput, tm) +
+      "<div style='margin-top:25px; display:flex; justify-content:space-between; align-items:flex-end; border-bottom:1px solid #444; padding-bottom:5px;'>" +
+        "<h5 style='margin:0'>Match Performance Timeline</h5>" +
+        "<select id='alliance-metric-select' style='width:auto; padding:5px 10px; background:#2c2c2c; color:#fff; border:1px solid #444; border-radius:4px; font-size:12px; margin:0;' onchange='updateTeamTimeline()'>" +
+          "<option value='totalPts'>Total Points</option>" +
+          "<option value='autoHubs'>Auto Hubs</option>" +
+          "<option value='teleHubs'>Teleop Hubs</option>" +
+          "<option value='ferry'>Ferry Volume</option>" +
+          "<option value='incap'>Seconds Dead (Incap)</option>" +
+        "</select>" +
+      "</div>" +
+      "<div id='team-timeline-graph' style='display:flex;overflow-x:auto;padding-top:20px;padding-bottom:10px'></div>" +
+      "<div id='team-detailed-stats' style='margin-top:20px;'></div>";
+
+    updateTeamTimeline(teamInput);
+    fetchDetailedTeamInfo(teamInput);
+    return;
+  }
+
+  var multiHeader = "<h4 style='margin:0 0 10px;color:#0a84ff;font-size:18px'>Multi-Team Deep Dive</h4>" +
+    "<p style='margin:0 0 12px;color:#aaa;font-size:12px'>Showing " + teamList.length + " teams. Timeline graph is available in single-team mode.</p>";
+
+  var sections = teamList.map(function(teamNum){
+    var tm = window.currentAllianceRoster.find(function(t){ return t.teamNumber === teamNum; });
+    return "<div class='deep-dive-team-block' style='border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px;background:#161616'>" +
+      buildTeamOverviewHtml(teamNum, tm) +
+      "<div id='team-detailed-stats-" + teamNum + "' style='margin-top:14px;'></div>" +
+    "</div>";
+  }).join("");
+
+  panel.innerHTML = multiHeader + sections;
+  teamList.forEach(function(teamNum){
+    fetchDetailedTeamInfo(teamNum, "team-detailed-stats-" + teamNum);
+  });
 }
 
 function renderDetailedTeamStats(data) {
   if (!data) return "<p style='color:#888'>Detailed statistics not available.</p>";
   
-    var noNull = function(v, suffix) { c
+    var noNull = function(v, suffix) {
       if (v === null || v === undefined) return "-";
       if (typeof v === "number") return v.toFixed(1) + (suffix || "");
       return v + (suffix || "");
@@ -2440,83 +2810,196 @@ function renderDetailedTeamStats(data) {
       ? data.driverEvents.join(", ") 
       : "None";
 
+    var rows = [
+      ["Autonomous", "Auto Hub", noNull((data.auto && (data.auto.avgHubScores != null ? data.auto.avgHubScores : data.auto.avgHubscores)))],
+      ["Autonomous", "Auto Passes", noNull(data.auto?.avgPasses)],
+      ["Autonomous", "Auto Climb Lvl", noNull(data.auto?.avgLevel)],
+      ["Teleop & Hub", "Total Hub Avg", noNull(data.hub?.scores?.avg) + " (±" + noNull(data.hub?.scores?.stdev) + ")"],
+      ["Teleop & Hub", "Hub Accuracy", pNoNull(data.hub?.avgAccuracy)],
+      ["Teleop & Hub", "Teleop Hub Avg", noNull(data.teleop?.hubScores?.avg) + " (±" + noNull(data.teleop?.hubScores?.stdev) + ")"],
+      ["Teleop & Hub", "Hub (Defended)", noNull(data.teleop?.hubScores?.avgWhenDefended)],
+      ["Passes & Defense", "Total Passes Avg", noNull(data.passes?.avg) + " (±" + noNull(data.passes?.stdev) + ")"],
+      ["Passes & Defense", "Teleop Passes", noNull(data.teleop?.passes?.avg) + " (±" + noNull(data.teleop?.passes?.stdev) + ")"],
+      ["Passes & Defense", "Defended %", pNoNull(data.teleop?.avgDefended)],
+      ["Endgame & Reliability", "Endgame Lvl", noNull(data.avgEndgameLevel)],
+      ["Endgame & Reliability", "Max Climb Level", noNull(data.climbLevel)],
+      ["Endgame & Reliability", "Downtime (Incap)", noNull(data.matchesIncapacitated) + " / " + noNull(data.matchesIn) + " matches"],
+      ["Endgame & Reliability", "Dead Matches", noNull(data.entireMatchesIncapacitated)],
+      ["Endgame & Reliability", "No Show", noNull(data.matchesMissed)],
+      ["Endgame & Reliability", "Driver Events", driverEvts],
+      ["Fouls", "Minor Fouls", noNull(data.avgMinorFouls)],
+      ["Fouls", "Major Fouls", noNull(data.avgMajorFouls)],
+      ["Pit Information", "Drivetrain", (data.drivetrain || "Unknown")],
+      ["Pit Information", "Shooter", (data.shooter || "Unknown")],
+      ["Pit Information", "Indexer", (data.indexer || "Unknown")],
+      ["Pit Information", "Weight", noNull(data.weightLbs, " lbs")]
+    ];
+
+    if(data.epa){
+      rows.push(["EPA Breakdown", "Total EPA", noNull(data.epa.total)]);
+      rows.push(["EPA Breakdown", "Auto EPA", noNull(data.epa.auto)]);
+      rows.push(["EPA Breakdown", "Auto Hub EPA", noNull(data.epa.autoHub)]);
+      rows.push(["EPA Breakdown", "Auto Tower EPA", noNull(data.epa.autoTower)]);
+      rows.push(["EPA Breakdown", "Teleop EPA", noNull(data.epa.teleop)]);
+      rows.push(["EPA Breakdown", "Teleop Hub EPA", noNull(data.epa.teleopHub)]);
+      rows.push(["EPA Breakdown", "Endgame EPA", noNull(data.epa.endgameTower)]);
+    }
+
+    var rowsHtml = rows.map(function(r){
+      return "<tr>" +
+        "<td style='padding:8px;border:1px solid #333;color:#aaa'>" + r[0] + "</td>" +
+        "<td style='padding:8px;border:1px solid #333;color:#ddd'>" + r[1] + "</td>" +
+        "<td style='padding:8px;border:1px solid #333;color:#fff'><b>" + r[2] + "</b></td>" +
+      "</tr>";
+    }).join("");
+
     return "" +
       "<h4 style='border-bottom:1px solid #444; padding-bottom:5px; margin-top:20px'>Detailed Backend Stats</h4>" +
-      "<div style='display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px; font-size:13px; color:#ccc;'>" +
-        "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#0a84ff; margin:0 0 5px;'>Autonomous</h5>" +
-        "<div><b>Auto Hub:</b> " + noNull((data.auto && (data.auto.avgHubScores != null ? data.auto.avgHubScores : data.auto.avgHubscores))) + "</div>" +
-        "<div><b>Auto Passes:</b> " + noNull(data.auto?.avgPasses) + "</div>" +
-        "<div><b>Auto Climb Lvl:</b> " + noNull(data.auto?.avgLevel) + "</div>" +
+      "<div style='overflow-x:auto'>" +
+      "<table style='width:100%;border-collapse:collapse;font-size:13px'>" +
+        "<thead><tr style='background:#222'><th style='padding:8px;border:1px solid #333;text-align:left;color:#aaa'>Section</th><th style='padding:8px;border:1px solid #333;text-align:left;color:#aaa'>Metric</th><th style='padding:8px;border:1px solid #333;text-align:left;color:#aaa'>Value</th></tr></thead>" +
+        "<tbody>" + rowsHtml + "</tbody>" +
+      "</table>" +
       "</div>" +
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#22c55e; margin:0 0 5px;'>Teleop & Overall Hub</h5>" +
-        "<div><b>Total Hub Avg:</b> " + noNull(data.hub?.scores?.avg) + " (±" + noNull(data.hub?.scores?.stdev) + ")</div>" +
-        "<div><b>Hub Accuracy:</b> " + pNoNull(data.hub?.avgAccuracy) + "</div>" +
-        "<div><b>Teleop Hub Avg:</b> " + noNull(data.teleop?.hubScores?.avg) + " (±" + noNull(data.teleop?.hubScores?.stdev) + ")</div>" +
-        "<div><b>Hub (Defended):</b> " + noNull(data.teleop?.hubScores?.avgWhenDefended) + "</div>" +
-        "</div>" +
-        "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-          "<h5 style='color:#74b9ff; margin:0 0 5px;'>Passes & Defense</h5>" +
-          "<div><b>Total Passes Avg:</b> " + noNull(data.passes?.avg) + " (±" + noNull(data.passes?.stdev) + ")</div>" +
-          "<div><b>Teleop Passes:</b> " + noNull(data.teleop?.passes?.avg) + " (±" + noNull(data.teleop?.passes?.stdev) + ")</div>" +
-        "<div><b>Defended %:</b> " + pNoNull(data.teleop?.avgDefended) + "</div>" +
-      "</div>" +
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#ff9500; margin:0 0 5px;'>Endgame & Reliability</h5>" +
-        "<div><b>Endgame Lvl:</b> " + noNull(data.avgEndgameLevel) + "</div>" +
-        "<div><b>Max Climb Level:</b> " + noNull(data.climbLevel) + "</div>" +
-        "<div><b>Downtime (Incap):</b> " + noNull(data.matchesIncapacitated) + " / " + noNull(data.matchesIn) + " matches</div>" +
-        "<div><b>Dead Matches:</b> " + noNull(data.entireMatchesIncapacitated) + "</div>" +
-        "<div><b>No Show:</b> " + noNull(data.matchesMissed) + "</div>" +
-        "<div><b>Driver Events:</b> " + driverEvts + "</div>" +
-      "</div>" +
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#eab308; margin:0 0 5px;'>Fouls</h5>" +
-        "<div><b>Minor Fouls:</b> " + noNull(data.avgMinorFouls) + "</div>" +
-        "<div><b>Major Fouls:</b> " + noNull(data.avgMajorFouls) + "</div>" +
-      "</div>" +
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#a855f7; margin:0 0 5px;'>Pit Information</h5>" +
-        "<div><b>Drivetrain:</b> " + (data.drivetrain || "Unknown") + "</div>" +
-        "<div><b>Shooter:</b> " + (data.shooter || "Unknown") + "</div>" +
-        "<div><b>Indexer:</b> " + (data.indexer || "Unknown") + "</div>" +
-        "<div><b>Weight:</b> " + noNull(data.weightLbs, " lbs") + "</div>" +
-      "</div>" +
-      (data.epa ? 
-      "<div style='background:#222; padding:10px; border-radius:8px;'>" +
-        "<h5 style='color:#f43f5e; margin:0 0 5px;'>EPA Breakdown</h5>" +
-        "<div><b>Total EPA:</b> " + noNull(data.epa.total) + "</div>" +
-        "<div><b>Auto EPA:</b> " + noNull(data.epa.auto) + "</div>" +
-        "<div><b>Auto Hub EPA:</b> " + noNull(data.epa.autoHub) + "</div>" +
-          "<div><b>Auto Tower EPA:</b> " + noNull(data.epa.autoTower) + "</div>" +
-          "<div><b>Teleop EPA:</b> " + noNull(data.epa.teleop) + "</div>" +
-          "<div><b>Teleop Hub EPA:</b> " + noNull(data.epa.teleopHub) + "</div>" +
-        "<div><b>Endgame EPA:</b> " + noNull(data.epa.endgameTower) + "</div>" +
-      "</div>" : "") +
-    "</div>" +
     "<div style='margin-top:20px;'><button onclick='{var t=document.getElementById(\"alliance-deep-dive-content\").innerHTML; openPrint(\"<h1 style=\\\"margin-top:0\\\">Team \"+document.getElementById(\"alliance-search-input\").value+\" Detailed Report</h1>\"+t, \"@media print { * { color: #000 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } body, #alliance-deep-dive-content, div[style*=\\\"background:#1a1a1a\\\"] { background: transparent !important; } div[style*=\\\"background:#222\\\"] { background: transparent !important; border: 1px solid #aaa !important; } }\");}' style='padding:8px 16px;background:#0a84ff;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:bold;cursor:pointer'>🖨️ Print Team Card</button></div>";
 }
 
-function fetchDetailedTeamInfo(teamNumber) {
-  var container = $("team-detailed-stats");
+function printAllDeepDiveStats(){
+  var panel = $("alliance-deep-dive-content");
+  if(!panel || panel.style.display === "none" || !panel.innerHTML.trim()){
+    alert("Run Analyze Team first to load deep-dive stats.");
+    return;
+  }
+
+  if(panel.innerHTML.indexOf("Loading detailed team info") !== -1){
+    var proceed = confirm("Some team details are still loading. Print anyway?");
+    if(!proceed) return;
+  }
+
+  var teamInputRaw = ($("alliance-search-input") && $("alliance-search-input").value) || "";
+  var teamList = parseTeamListInput(teamInputRaw);
+  if(!teamList.length){
+    teamList = Object.keys(deepDiveTeamCache).map(function(k){ return parseInt(k, 10); }).filter(function(n){ return !isNaN(n); });
+  }
+
+  function f(v, d){
+    var n = Number(v);
+    if(isNaN(n)) return "-";
+    return n.toFixed(d == null ? 1 : d);
+  }
+
+  var preloadWindow = window.open("", "", "width=1200,height=800");
+  if(preloadWindow){
+    preloadWindow.document.write("<html><head><title>Preparing Compact Summary</title></head><body style='font-family:sans-serif;padding:18px'><h2 style='margin-top:0'>Preparing compact one-page summary...</h2><p>Please wait.</p></body></html>");
+    preloadWindow.document.close();
+  }
+
+  fetchStatboticsEventTeamMap().then(function(sbMap){
+    var rows = teamList.map(function(team){
+      var cache = deepDiveTeamCache[String(team)] || {};
+      var core = cache.coreData || {};
+      var sb = sbMap[String(team)] || {};
+
+      var autoFuel = core.auto ? (core.auto.avgHubScores != null ? core.auto.avgHubScores : core.auto.avgHubscores) : null;
+      var teleFuel = core.teleop && core.teleop.hubScores ? core.teleop.hubScores.avg : null;
+      var climbLevel = core.climbLevel != null ? Number(core.climbLevel) : Number(core.avgEndgameLevel || 0);
+      var climbFlag = climbLevel > 0 ? ("Yes (L" + Math.round(climbLevel) + ")") : "No";
+      var incapac = (core.matchesIncapacitated != null ? core.matchesIncapacitated : "-") + " / " + (core.matchesIn != null ? core.matchesIn : "-");
+
+      return "<tr>" +
+        "<td style='padding:2px 3px;border:1px solid #999'><b>" + team + "</b></td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(autoFuel,1) + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(teleFuel,1) + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + climbFlag + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + incapac + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(sb.epaTotal,1) + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(sb.epaAuto,1) + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(sb.epaTele,1) + "</td>" +
+        "<td style='padding:2px 3px;border:1px solid #999'>" + f(sb.predScore,1) + "</td>" +
+      "</tr>";
+    }).join("");
+
+    var sbEventKey = getStatboticsEventKeyFromInputs() || "(not set)";
+    var title = "<h1 style='margin:0 0 3px;font-size:14px'>Drive Team One-Page Compact Table</h1>" +
+      "<div style='font-size:9px;color:#444;margin-bottom:5px'>Teams: " + (teamList.join(", ") || "-") + " | Statbotics Event: " + sbEventKey + "</div>";
+    var table = "<table style='width:100%;border-collapse:collapse;font-size:8px;line-height:1.1'>" +
+      "<thead><tr style='background:#efefef'>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>Team</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>Avg Auto Fuel</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>Avg Tele Fuel</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>Climb</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>Incapacitated (M/In)</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>SB EPA Total</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>SB Auto</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>SB Tele</th>" +
+        "<th style='padding:2px 3px;border:1px solid #999;text-align:left'>SB Pred Score</th>" +
+      "</tr></thead><tbody>" + (rows || "<tr><td colspan='9' style='padding:4px;border:1px solid #999'>No loaded team data yet.</td></tr>") + "</tbody></table>";
+
+    var printCss = "@media print { " +
+      "@page { size: landscape; margin: 0.16in; } " +
+      "* { color: #000 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } " +
+      "body { background:#fff !important; font-size:8px !important; } " +
+      "table, th, td { border-color:#999 !important; } " +
+      "}";
+
+    openPrint(title + table, printCss, true, preloadWindow);
+  }).catch(function(){
+    if(preloadWindow && !preloadWindow.closed){
+      preloadWindow.document.body.innerHTML = "<h2 style='margin-top:0;color:#b91c1c'>Could not build compact summary</h2><p>Failed to load Statbotics map.</p>";
+    }
+  });
+}
+
+function fetchDetailedTeamInfo(teamNumber, containerId) {
+  var targetId = containerId || "team-detailed-stats";
+  var container = $(targetId);
   if (!container) return;
   container.innerHTML = "<p style='color:#888'>Loading detailed team info...</p>";
   
-  var activeEvt = localStorage.getItem("@scanner_active_event") || "2026A";
-  var eventCode = activeEvt.substring(0,5).padEnd(5,"A");
-  
-  fetchWithAuth(API_URL + "/team/" + encodeURIComponent(teamNumber) + "?eventCode=" + encodeURIComponent(eventCode))
-    .then(function(res){
-      if(!res.ok) throw new Error("Status " + res.status);
-      return res.json();
-    })
-    .then(function(data){
-      container.innerHTML = renderDetailedTeamStats(data);
-    })
+  var activeEvt = localStorage.getItem("@scanner_active_event") || "pncmp";
+  var eventCodeCandidates = buildEventCodeCandidates(activeEvt);
+  debugDeepDive("Fetching detailed info", { teamNumber: teamNumber, eventCodeCandidates: eventCodeCandidates, containerId: targetId });
+
+  var tbaPromise = fetchTbaTeamDeepDive(teamNumber).catch(function(){ return null; });
+  var corePromise = tryFetchTeamStatsByRoutes(teamNumber, eventCodeCandidates)
     .catch(function(err){
-      container.innerHTML = "<p style='color:#ff453a'>Failed to load detailed info: " + err.message + "</p>";
+      // Fallback: load from local reports if backend endpoint fails
+      log("Backend team stats unavailable, loading from local reports...", "info");
+      return fetchLocalTeamStats(teamNumber, eventCodeCandidates)
+        .catch(function(){
+          throw err;
+        });
     });
+
+  Promise.all([
+    tbaPromise.then(function(v){ return v; }).catch(function(){ return null; }),
+    corePromise.then(function(v){ return v; }).catch(function(){ return null; })
+  ]).then(function(parts){
+    var tbaData = parts[0];
+    var coreData = parts[1];
+    deepDiveTeamCache[String(teamNumber)] = { tbaData: tbaData, coreData: coreData };
+    debugDeepDive("Fetch results", { teamNumber: teamNumber, hasTbaData: !!tbaData, hasCoreData: !!coreData });
+
+    var html = "";
+    if(tbaData){
+      html += renderTbaTeamStatsTable(tbaData);
+    } else {
+      html += renderLocalTeamFallbackTable(teamNumber, coreData);
+    }
+
+    if(coreData){
+      html += renderDetailedTeamStats(coreData);
+    } else {
+      html += "<div style='margin-top:10px;color:#ff453a;font-size:12px'>No backend/local stats found for Team " + teamNumber + ". Check connection, event filters, or whether this team has scanned reports.</div>";
+    }
+
+    if(!tbaData && !coreData){
+      log("Deep dive has no TBA or local data for Team " + teamNumber + ".", "error");
+      debugDeepDive("No data from any source", { teamNumber: teamNumber });
+    }
+
+    container.innerHTML = html;
+  });
 }
 
 function updateTeamTimeline(overrideTeam) {
@@ -2761,12 +3244,22 @@ function applyLocalFilters(all) {
 
 // ─── DATA TABLE ──────────────────────────────────────────────────────────────
 function fetchData(){
-  if(!AUTH_TOKEN) return;
+  if((!AUTH_TOKEN && !REFRESH_TOKEN) || AUTH_TOKEN === "offline-demo-token"){
+    renderTableFromLocalCache();
+    return;
+  }
 
   fetchReportList({take: 40, skip: 0})
   .then(function(data){
+    data = normalizeReportList(data);
     window.lastFetchedMaxId = data.reduce(function(max, d){ return Math.max(max, d.id || 0); }, 0);
     var visibleData = applyLocalFilters(data);
+
+    // If local filters hide all backend rows, still render recent backend matches.
+    if(data.length > 0 && visibleData.length === 0){
+      visibleData = data.slice();
+      log("Filters hid all backend rows; showing unfiltered recent matches.", "info");
+    }
 
     visibleData.sort(function(a,b){ return b.id - a.id; });
     tableBody.innerHTML = visibleData.map(function(r){
@@ -3102,6 +3595,311 @@ function closeTeamStatsModal(){
   $("team-stats-modal").classList.add("hidden");
 }
 
+var currentTeamStatsPrintPayload = null;
+
+function printStatCell(label, value){
+  return "<div style='border:1px solid #ddd;border-radius:8px;padding:10px;background:#fff'>" +
+    "<div style='font-size:11px;color:#666;margin-bottom:4px'>" + label + "</div>" +
+    "<div style='font-size:16px;font-weight:700;color:#111'>" + value + "</div>" +
+  "</div>";
+}
+
+function buildTeamStatsPrintHTML(teamNum, eventCode, stats){
+  var autoAvgHubScores = stats && stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : null;
+  var defendedRatio = stats && stats.teleop ? stats.teleop.avgDefended : null;
+  var defendedPercent = defendedRatio == null ? null : (defendedRatio <= 1 ? defendedRatio * 100 : defendedRatio);
+
+  var html = "<div style='text-align:left;color:#111'>" +
+    "<h1 style='margin:0 0 4px;font-size:24px'>Team " + teamNum + " Detailed Stats</h1>" +
+    "<p style='margin:0 0 16px;color:#444'>Event: <b>" + String(eventCode || "").toUpperCase() + "</b></p>";
+
+  html += "<h2 style='font-size:16px;margin:14px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px'>Hub Scoring</h2>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px'>" +
+      printStatCell("Avg Hub Scores", formatNum(stats.hub && stats.hub.scores && stats.hub.scores.avg)) +
+      printStatCell("Hub Stdev", formatNum(stats.hub && stats.hub.scores && stats.hub.scores.stdev)) +
+      printStatCell("Hub Accuracy", formatNum(stats.hub && stats.hub.avgAccuracy, 2) + "%") +
+    "</div>";
+
+  html += "<h2 style='font-size:16px;margin:14px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px'>Passes</h2>" +
+    "<div style='display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px'>" +
+      printStatCell("Avg Passes", formatNum(stats.passes && stats.passes.avg)) +
+      printStatCell("Pass Stdev", formatNum(stats.passes && stats.passes.stdev)) +
+    "</div>";
+
+  html += "<h2 style='font-size:16px;margin:14px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px'>Auto / Teleop</h2>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px'>" +
+      printStatCell("Auto Avg Hub", formatNum(autoAvgHubScores)) +
+      printStatCell("Auto Avg Level", formatNum(stats.auto && stats.auto.avgLevel, 2)) +
+      printStatCell("Auto Avg Passes", formatNum(stats.auto && stats.auto.avgPasses)) +
+      printStatCell("Teleop Avg Hub", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avg)) +
+      printStatCell("Teleop Hub Stdev", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.stdev)) +
+      printStatCell("Teleop Avg Defended Hub", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avgWhenDefended)) +
+      printStatCell("Teleop Avg Passes", formatNum(stats.teleop && stats.teleop.passes && stats.teleop.passes.avg)) +
+      printStatCell("Defended Rate", formatNum(defendedPercent, 2) + "%") +
+      printStatCell("Avg Endgame Level", formatNum(stats.avgEndgameLevel)) +
+    "</div>";
+
+  html += "<h2 style='font-size:16px;margin:14px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px'>Reliability / Team</h2>" +
+    "<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px'>" +
+      printStatCell("Minor Fouls", formatNum(stats.avgMinorFouls)) +
+      printStatCell("Major Fouls", formatNum(stats.avgMajorFouls)) +
+      printStatCell("Matches Played", String(stats.matchesIn || "?")) +
+      printStatCell("Missed Matches", String(stats.matchesMissed || "0")) +
+      printStatCell("Incapacitated Matches", String(stats.matchesIncapacitated || "0")) +
+      printStatCell("Drivetrain", stats.drivetrain || "Unknown") +
+      printStatCell("Shooter", stats.shooter || "Unknown") +
+      printStatCell("Indexer", stats.indexer || "Unknown") +
+      printStatCell("Climb Level", String(stats.climbLevel || "0")) +
+      printStatCell("Driver Events", String(stats.driverEvents || "0")) +
+      printStatCell("Weight (lbs)", String(stats.weightLbs || "?")) +
+    "</div>";
+
+  if(stats.epa){
+    html += "<h2 style='font-size:16px;margin:14px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px'>EPA</h2>" +
+      "<div style='display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px'>" +
+        printStatCell("Total EPA", formatNum(stats.epa.total)) +
+        printStatCell("Auto", formatNum(stats.epa.auto)) +
+        printStatCell("Auto Hub", formatNum(stats.epa.autoHub)) +
+        printStatCell("Auto Tower", formatNum(stats.epa.autoTower)) +
+        printStatCell("Teleop", formatNum(stats.epa.teleop)) +
+        printStatCell("Teleop Hub", formatNum(stats.epa.teleopHub)) +
+        printStatCell("Endgame Tower", formatNum(stats.epa.endgameTower)) +
+      "</div>";
+  }
+
+  html += "</div>";
+  return html;
+}
+
+function printTeamStatsReport(){
+  if(!currentTeamStatsPrintPayload){
+    alert("Load team stats first.");
+    return;
+  }
+
+  if(currentTeamStatsPrintPayload.html){
+    openPrint(currentTeamStatsPrintPayload.html, currentTeamStatsPrintPayload.printStyle || "@media print{@page{size:portrait;margin:0.35in} body{font-size:11px;color:#111} h1,h2,h3,p,div,td,th{color:#111 !important}}", false);
+    return;
+  }
+
+  if(!currentTeamStatsPrintPayload.stats){
+    alert("Load team stats first.");
+    return;
+  }
+
+  var payload = currentTeamStatsPrintPayload;
+  var html = buildTeamStatsPrintHTML(payload.teamNum, payload.eventCode, payload.stats);
+  openPrint(html, "@media print{@page{size:portrait;margin:0.45in} body{font-size:12px;color:#111} h1,h2,h3,p,div{color:#111 !important}}", false);
+}
+
+function parseTeamStatsTeamList(raw){
+  var txt = String(raw || "").trim();
+  if(!txt) return [];
+  var seen = Object.create(null);
+  return txt.split(/[\s,]+/)
+    .map(function(t){ return parseInt(t, 10); })
+    .filter(function(n){ return !isNaN(n) && n > 0; })
+    .filter(function(n){
+      var key = String(n);
+      if(seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+}
+
+function fetchSingleTeamStatsForPrint(teamNum, normalizedEventCode, eventCodeCandidates){
+  return tryFetchTeamStatsByRoutes(teamNum, eventCodeCandidates)
+    .then(function(stats){
+      if(!stats) throw new Error("No stats payload returned.");
+
+      if(hasDetailedCoreTeamStats(stats)){
+        return { teamNum: teamNum, stats: stats, source: "backend" };
+      }
+
+      return fetchLocalTeamStats(teamNum, eventCodeCandidates)
+        .then(function(localStats){
+          var merged = mergeTeamStatsPreferPrimary(stats, localStats);
+          return { teamNum: teamNum, stats: merged, source: "backend+local" };
+        })
+        .catch(function(){
+          return { teamNum: teamNum, stats: stats, source: "backend-partial" };
+        });
+    })
+    .catch(function(){
+      return fetchLocalTeamStats(teamNum, eventCodeCandidates)
+        .then(function(localStats){
+          return { teamNum: teamNum, stats: localStats, source: "local" };
+        });
+    });
+}
+
+function buildTeamStatsTableSection(teamNum, eventCode, stats, source){
+  var autoAvgHubScores = stats && stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : null;
+  var defendedRatio = stats && stats.teleop ? stats.teleop.avgDefended : null;
+  var defendedPercent = defendedRatio == null ? null : (defendedRatio <= 1 ? defendedRatio * 100 : defendedRatio);
+
+  var rows = [
+    ["Hub Avg", formatNum(stats.hub && stats.hub.scores && stats.hub.scores.avg)],
+    ["Hub Stdev", formatNum(stats.hub && stats.hub.scores && stats.hub.scores.stdev)],
+    ["Hub Accuracy", formatNum(stats.hub && stats.hub.avgAccuracy, 2) + "%"],
+    ["Pass Avg", formatNum(stats.passes && stats.passes.avg)],
+    ["Pass Stdev", formatNum(stats.passes && stats.passes.stdev)],
+    ["Avg Auto Fuel", formatNum(autoAvgHubScores)],
+    ["Auto Avg Level", formatNum(stats.auto && stats.auto.avgLevel, 2)],
+    ["Auto Avg Passes", formatNum(stats.auto && stats.auto.avgPasses)],
+    ["Avg Tele Fuel", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avg)],
+    ["Tele Hub Stdev", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.stdev)],
+    ["Tele Avg Defended", formatNum(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avgWhenDefended)],
+    ["Tele Pass Avg", formatNum(stats.teleop && stats.teleop.passes && stats.teleop.passes.avg)],
+    ["Defended %", formatNum(defendedPercent, 2) + "%"],
+    ["Avg Endgame Level", formatNum(stats.avgEndgameLevel)],
+    ["Minor/Major Fouls", formatNum(stats.avgMinorFouls) + " / " + formatNum(stats.avgMajorFouls)],
+    ["Matches In / Missed / Incap", String(stats.matchesIn || "0") + " / " + String(stats.matchesMissed || "0") + " / " + String(stats.matchesIncapacitated || "0")],
+    ["Climb Level", String(stats.climbLevel || "0")],
+    ["Drivetrain / Shooter / Indexer", (stats.drivetrain || "Unknown") + " / " + (stats.shooter || "Unknown") + " / " + (stats.indexer || "Unknown")],
+    ["Weight (lbs)", String(stats.weightLbs || "?")],
+    ["Data Source", source || "unknown"]
+  ];
+
+  if(stats.epa){
+    rows.push(["EPA Total", formatNum(stats.epa.total)]);
+    rows.push(["EPA Auto", formatNum(stats.epa.auto)]);
+    rows.push(["EPA Tele", formatNum(stats.epa.teleop)]);
+    rows.push(["EPA Endgame", formatNum(stats.epa.endgameTower)]);
+  }
+
+  var body = rows.map(function(r){
+    return "<tr><td style='border:1px solid #444;padding:6px;font-size:12px;color:#bbb'>" + r[0] + "</td><td style='border:1px solid #444;padding:6px;font-size:12px'><b>" + r[1] + "</b></td></tr>";
+  }).join("");
+
+  var summary = buildTeamNaturalSummary(teamNum, stats);
+
+  return "<div style='margin-bottom:14px;padding:10px;border:1px solid #333;border-radius:8px;background:#1f1f1f'>" +
+    "<h3 style='margin:0 0 8px;color:#60a5fa'>Team " + teamNum + " - " + String(eventCode || "").toUpperCase() + "</h3>" +
+    "<div style='margin:0 0 8px;padding:8px;border:1px solid #2f3b2f;border-radius:6px;background:rgba(34,197,94,.08);font-size:12px;color:#d1fae5'><b>Drive Note:</b> " + summary + "</div>" +
+    "<table style='width:100%;border-collapse:collapse'>" +
+      "<thead><tr style='background:#242424'><th style='border:1px solid #444;padding:6px;text-align:left;font-size:11px;color:#999'>Metric</th><th style='border:1px solid #444;padding:6px;text-align:left;font-size:11px;color:#999'>Value</th></tr></thead>" +
+      "<tbody>" + body + "</tbody>" +
+    "</table>" +
+  "</div>";
+}
+
+function buildTeamNaturalSummary(teamNum, stats){
+  var autoFuel = Number(stats && stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : 0);
+  var teleFuel = Number(stats && stats.teleop && stats.teleop.hubScores ? stats.teleop.hubScores.avg : 0);
+  var defendedRatio = Number(stats && stats.teleop ? stats.teleop.avgDefended : 0);
+  var defendedPct = defendedRatio <= 1 ? defendedRatio * 100 : defendedRatio;
+  var incapMatches = Number(stats && stats.matchesIncapacitated || 0);
+  var matchesIn = Number(stats && stats.matchesIn || 0);
+  var endLvl = Number(stats && stats.avgEndgameLevel || 0);
+  var telePass = Number(stats && stats.teleop && stats.teleop.passes ? stats.teleop.passes.avg : 0);
+  var hubAcc = Number(stats && stats.hub ? stats.hub.avgAccuracy : 0);
+  var epaTotal = Number(stats && stats.epa ? stats.epa.total : 0);
+
+  var role = "balanced contributor";
+  if(autoFuel >= 4 && teleFuel >= 8) role = "high-volume scorer";
+  else if(autoFuel >= 4) role = "strong auto starter";
+  else if(teleFuel >= 9) role = "teleop finisher";
+  else if(telePass >= 3) role = "pass/ferry support";
+
+  var reliability = "reliable";
+  if(matchesIn > 0){
+    var incapPct = (incapMatches / matchesIn) * 100;
+    if(incapPct >= 35) reliability = "high downtime risk";
+    else if(incapPct >= 15) reliability = "moderate downtime risk";
+  }
+
+  var climbText = endLvl >= 2 ? "likely to provide climb points" : (endLvl >= 1 ? "can provide occasional climb points" : "climb contribution limited");
+  var defenseText = defendedPct >= 45 ? "handles defense pressure often" : (defendedPct >= 20 ? "sees moderate defense" : "rarely heavily defended");
+  var accuracyText = hubAcc >= 70 ? "good shot efficiency" : (hubAcc >= 50 ? "average shot efficiency" : "low shot efficiency");
+
+  var scoreSignal = epaTotal > 0 ? ("EPA " + epaTotal.toFixed(1)) : ("avg fuel " + (autoFuel + teleFuel).toFixed(1));
+
+  return "Team " + teamNum + " profiles as a " + role + " (" + scoreSignal + "), is " + reliability + ", " + climbText + ", " + defenseText + ", and has " + accuracyText + ".";
+}
+
+function buildMultiTeamStatsComparisonHtml(okRows, normalizedEventCode){
+  function autoAvg(stats){
+    return stats && stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : null;
+  }
+  function defPct(stats){
+    var r = stats && stats.teleop ? stats.teleop.avgDefended : null;
+    if(r == null) return null;
+    return r <= 1 ? r * 100 : r;
+  }
+  function fmt(v, d){ return formatNum(v, d == null ? 1 : d); }
+
+  var metrics = [
+    { label: "Hub Avg", get: function(s){ return fmt(s.hub && s.hub.scores && s.hub.scores.avg); } },
+    { label: "Hub Stdev", get: function(s){ return fmt(s.hub && s.hub.scores && s.hub.scores.stdev); } },
+    { label: "Hub Accuracy %", get: function(s){ return fmt(s.hub && s.hub.avgAccuracy, 2) + "%"; } },
+    { label: "Pass Avg", get: function(s){ return fmt(s.passes && s.passes.avg); } },
+    { label: "Pass Stdev", get: function(s){ return fmt(s.passes && s.passes.stdev); } },
+    { label: "Avg Auto Fuel", get: function(s){ return fmt(autoAvg(s)); } },
+    { label: "Avg Tele Fuel", get: function(s){ return fmt(s.teleop && s.teleop.hubScores && s.teleop.hubScores.avg); } },
+    { label: "Tele Defended Avg", get: function(s){ return fmt(s.teleop && s.teleop.hubScores && s.teleop.hubScores.avgWhenDefended); } },
+    { label: "Defended %", get: function(s){ return fmt(defPct(s), 2) + "%"; } },
+    { label: "Avg Endgame Lvl", get: function(s){ return fmt(s.avgEndgameLevel); } },
+    { label: "Incap Matches", get: function(s){ return String(s.matchesIncapacitated || 0); } },
+    { label: "Matches In", get: function(s){ return String(s.matchesIn || 0); } },
+    { label: "Missed", get: function(s){ return String(s.matchesMissed || 0); } },
+    { label: "Minor/Major Fouls", get: function(s){ return fmt(s.avgMinorFouls) + "/" + fmt(s.avgMajorFouls); } },
+    { label: "Climb Level", get: function(s){ return String(s.climbLevel || 0); } }
+  ];
+
+  metrics.push({ label: "EPA Total", get: function(s){ return fmt(s.epa && s.epa.total); } });
+  metrics.push({ label: "EPA Auto", get: function(s){ return fmt(s.epa && s.epa.auto); } });
+  metrics.push({ label: "EPA Tele", get: function(s){ return fmt(s.epa && s.epa.teleop); } });
+  metrics.push({ label: "EPA Endgame", get: function(s){ return fmt(s.epa && s.epa.endgameTower); } });
+
+  var header = "<tr style='background:#242424'>" +
+      "<th style='border:1px solid #444;padding:5px;text-align:left;font-size:11px;color:#999;white-space:nowrap'>Metric</th>" +
+    okRows.map(function(r){
+      return "<th style='border:1px solid #444;padding:5px;text-align:left;font-size:11px;color:#60a5fa;white-space:nowrap'>T" + r.result.teamNum + "</th>";
+    }).join("") +
+  "</tr>";
+
+  var body = metrics.map(function(m){
+    var cells = okRows.map(function(r){
+      return "<td style='border:1px solid #444;padding:4px 5px;font-size:11px;white-space:nowrap'>" + m.get(r.result.stats) + "</td>";
+    }).join("");
+    return "<tr>" +
+      "<td style='border:1px solid #444;padding:4px 5px;font-size:11px;color:#bbb;white-space:nowrap'>" + m.label + "</td>" +
+      cells +
+    "</tr>";
+  }).join("");
+
+  var sourceRow = "<tr>" +
+    "<td style='border:1px solid #444;padding:4px 5px;font-size:11px;color:#bbb;white-space:nowrap'>Source</td>" +
+    okRows.map(function(r){
+      return "<td style='border:1px solid #444;padding:4px 5px;font-size:11px;white-space:nowrap'>" + (r.result.source || "-") + "</td>";
+    }).join("") +
+  "</tr>";
+
+  var notesRows = okRows.map(function(r){
+    var note = buildTeamNaturalSummary(r.result.teamNum, r.result.stats);
+    return "<tr>" +
+      "<td style='border:1px solid #444;padding:3px 4px;font-size:10px;white-space:nowrap;color:#60a5fa'><b>T" + r.result.teamNum + "</b></td>" +
+      "<td style='border:1px solid #444;padding:3px 4px;font-size:10px' colspan='" + okRows.length + "'>" + note + "</td>" +
+    "</tr>";
+  }).join("");
+
+  return "<div style='text-align:left'>" +
+    "<h2 style='margin:0 0 6px;color:#0a84ff'>Team Stats Deep Dive Matrix " + normalizedEventCode.toUpperCase() + "</h2>" +
+    "<p style='color:#aaa;margin:0 0 8px;font-size:11px'>Compact comparison table for " + okRows.length + " teams.</p>" +
+    "<div style='overflow:auto'>" +
+      "<table style='width:100%;border-collapse:collapse'>" +
+        "<thead>" + header + "</thead>" +
+        "<tbody>" + body + sourceRow + "</tbody>" +
+      "</table>" +
+      "<table style='width:100%;border-collapse:collapse;margin-top:7px'>" +
+        "<thead><tr style='background:#242424'><th style='border:1px solid #444;padding:5px;text-align:left;font-size:11px;color:#999;width:88px'>Team</th><th style='border:1px solid #444;padding:5px;text-align:left;font-size:11px;color:#999'>Drive Note</th></tr></thead>" +
+        "<tbody>" + notesRows + "</tbody>" +
+      "</table>" +
+    "</div>" +
+  "</div>";
+}
+
 function buildEventCodeCandidates(rawEventCode){
   var inputRaw = String(rawEventCode || "").trim();
   if(!inputRaw) return [];
@@ -3139,21 +3937,68 @@ function normalizeTeamStatsEventCode(rawEventCode){
   return base.substring(0,5);
 }
 
-function tryFetchTeamStatsByRoutes(teamNum, eventCodes){
-  var routes = [];
-  eventCodes.forEach(function(ev){
-    routes.push(API_URL + "/team/" + encodeURIComponent(ev) + "/" + encodeURIComponent(teamNum));
-    routes.push(API_URL + "/team/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(ev));
+function buildEventCodeCandidates(rawEventCode){
+  var input = String(rawEventCode || "").trim();
+  var norm = normalizeTeamStatsEventCode(input);
+  var list = [];
+
+  [input, norm, norm.toLowerCase(), norm.toUpperCase()].forEach(function(v){
+    if(v && v.length) list.push(v);
   });
+
+  if(norm && norm.length === 5){
+    list.push("2026" + norm);
+    list.push("2026" + norm.toUpperCase());
+    list.push("2026" + norm.toLowerCase());
+  }
+
+  var seen = Object.create(null);
+  return list.filter(function(v){
+    var key = String(v);
+    if(seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
+function tryFetchTeamStatsByRoutes(teamNum, eventCodes){
+  var routeDefs = [];
+  eventCodes.forEach(function(ev){
+    // Prefer modern forms first to avoid noisy 404s from legacy route order.
+    routeDefs.push({ id: "team-stats-query", url: API_URL + "/team-stats/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(ev) });
+    routeDefs.push({ id: "team-stats-path", url: API_URL + "/team-stats/" + encodeURIComponent(ev) + "/" + encodeURIComponent(teamNum) });
+    routeDefs.push({ id: "team-query", url: API_URL + "/team/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(ev) });
+    routeDefs.push({ id: "team-team-event", url: API_URL + "/team/" + encodeURIComponent(teamNum) + "/" + encodeURIComponent(ev) });
+    // Keep legacy route last as a fallback only.
+    routeDefs.push({ id: "team-event-team", url: API_URL + "/team/" + encodeURIComponent(ev) + "/" + encodeURIComponent(teamNum) });
+  });
+
+  // Deduplicate url attempts in case event variants generate the same path.
+  var seen = Object.create(null);
+  routeDefs = routeDefs.filter(function(r){
+    if(seen[r.url]) return false;
+    seen[r.url] = true;
+    return true;
+  });
+
+  var preferredTemplate = localStorage.getItem(TEAM_STATS_ROUTE_TEMPLATE_KEY) || "";
+  if(preferredTemplate){
+    routeDefs.sort(function(a, b){
+      var ap = a.id === preferredTemplate ? 1 : 0;
+      var bp = b.id === preferredTemplate ? 1 : 0;
+      return bp - ap;
+    });
+  }
 
   var idx = 0;
   function next(){
-    if(idx >= routes.length) return Promise.reject(new Error("No matching team-stats route found (all returned 404)."));
-    var url = routes[idx++];
-    return fetchWithAuth(url, {})
+    if(idx >= routeDefs.length) return Promise.reject(new Error("No matching team stats endpoint found (all candidate routes returned 404)."));
+    var route = routeDefs[idx++];
+    return fetchWithAuth(route.url, {})
       .then(function(res){
         if(res.status === 404) return next();
         if(!res.ok) throw new Error("HTTP " + res.status);
+        localStorage.setItem(TEAM_STATS_ROUTE_TEMPLATE_KEY, route.id);
         return res.json();
       });
   }
@@ -3183,6 +4028,18 @@ function reportEventMatchesCandidates(reportEventCode, eventCodes){
     if(evLower.substring(0,5) === cLower.substring(0,5)) return true;
   }
   return false;
+}
+
+function getQueuedReportsForTeam(teamNum, eventCodes){
+  var list = Array.isArray(pendingReports) ? pendingReports : [];
+  return list
+    .map(function(item){ return item && item.payload ? item.payload : null; })
+    .filter(function(p){
+      if(!p) return false;
+      if(String(p.teamNumber) !== String(teamNum)) return false;
+      if(!eventCodes || !eventCodes.length) return true;
+      return reportEventMatchesCandidates(p.eventCode, eventCodes);
+    });
 }
 
 function buildTeamStatsFromReports(matches){
@@ -3268,14 +4125,75 @@ function buildTeamStatsFromReports(matches){
   };
 }
 
+function isFilledStatValue(v){
+  return v !== null && v !== undefined && !(typeof v === "number" && isNaN(v));
+}
+
+function hasDetailedCoreTeamStats(stats){
+  if(!stats || typeof stats !== "object") return false;
+
+  var hasHub = isFilledStatValue(stats.hub && stats.hub.scores && stats.hub.scores.avg);
+  var hasPasses = isFilledStatValue(stats.passes && stats.passes.avg);
+  var autoAvg = stats.auto ? (stats.auto.avgHubScores != null ? stats.auto.avgHubScores : stats.auto.avgHubscores) : null;
+  var hasAuto = isFilledStatValue(autoAvg);
+  var hasTele = isFilledStatValue(stats.teleop && stats.teleop.hubScores && stats.teleop.hubScores.avg);
+  var hasReliability = isFilledStatValue(stats.matchesIn) || isFilledStatValue(stats.avgEndgameLevel);
+
+  return !!(hasHub || hasPasses || hasAuto || hasTele || hasReliability);
+}
+
+function mergeTeamStatsPreferPrimary(primary, fallback){
+  if(primary == null) return fallback;
+  if(fallback == null) return primary;
+
+  if(Array.isArray(primary)) return primary;
+  if(Array.isArray(fallback)) return primary;
+  if(typeof primary !== "object" || typeof fallback !== "object") return primary;
+
+  var out = {};
+  var keys = Object.keys(fallback).concat(Object.keys(primary));
+  var seen = Object.create(null);
+
+  keys.forEach(function(k){
+    if(seen[k]) return;
+    seen[k] = true;
+
+    var p = primary[k];
+    var f = fallback[k];
+
+    if(p === null || p === undefined){
+      out[k] = f;
+      return;
+    }
+
+    if(typeof p === "object" && p !== null && !Array.isArray(p) && typeof f === "object" && f !== null && !Array.isArray(f)){
+      out[k] = mergeTeamStatsPreferPrimary(p, f);
+      return;
+    }
+
+    out[k] = p;
+  });
+
+  return out;
+}
+
 function fetchLocalTeamStats(teamNum, eventCodes){
+  var queuedForTeam = getQueuedReportsForTeam(teamNum, eventCodes);
+  debugDeepDive("Local stats fetch started", { teamNum: teamNum, queuedCount: queuedForTeam.length, eventCodes: eventCodes });
+
   return fetchReportList({take: 2000, skip: 0})
     .then(function(all){
       var teamMatches = normalizeReportList(all).filter(function(r){
         return String(r.teamNumber) === String(teamNum);
       });
+      debugDeepDive("Backend report list counts", { teamNum: teamNum, totalPulled: normalizeReportList(all).length, teamMatches: teamMatches.length });
 
-      if(teamMatches.length === 0) throw new Error("No reports found for this team.");
+      // If backend has nothing for this team, fall back to unsynced local queue.
+      if(teamMatches.length === 0){
+        if(queuedForTeam.length === 0) throw new Error("No reports found for this team.");
+        debugDeepDive("Using queued reports only", { teamNum: teamNum, queuedCount: queuedForTeam.length });
+        return queuedForTeam;
+      }
 
       var eventMatches = teamMatches.filter(function(r){
         return reportEventMatchesCandidates(r.eventCode, eventCodes);
@@ -3292,7 +4210,17 @@ function fetchLocalTeamStats(teamNum, eventCodes){
           .catch(function(){ return r; });
       });
 
-      return Promise.all(fullPromises);
+      return Promise.all(fullPromises)
+        .then(function(fullMatches){
+          // Merge in unsynced local queue payloads so deep-dive still has data offline.
+          debugDeepDive("Built full local match set", { teamNum: teamNum, fullMatches: fullMatches.length, queuedMerged: queuedForTeam.length });
+          return fullMatches.concat(queuedForTeam);
+        });
+    })
+    .catch(function(err){
+      if(queuedForTeam.length === 0) throw err;
+      debugDeepDive("Backend local fetch failed, using queued fallback", { teamNum: teamNum, error: err && err.message ? err.message : String(err) });
+      return queuedForTeam;
     })
     .then(function(fullMatches){
       var stats = buildTeamStatsFromReports(fullMatches);
@@ -3302,11 +4230,12 @@ function fetchLocalTeamStats(teamNum, eventCodes){
 }
 
 function fetchTeamStats(){
-  var teamNum = $("team-stats-team-input").value;
+  var teamRaw = $("team-stats-team-input").value;
   var eventCode = $("team-stats-event-input").value;
   
-  if(!teamNum || !eventCode) {
-    alert("Please enter both team number and event code.");
+  var teamList = parseTeamStatsTeamList(teamRaw);
+  if(!teamList.length || !eventCode) {
+    alert("Please enter team number(s) and event code.");
     return;
   }
   
@@ -3316,35 +4245,60 @@ function fetchTeamStats(){
     return;
   }
 
-  log("Fetching team stats for Team " + teamNum + " (Event: " + normalizedEventCode + ")...", "info");
+  var eventCodeCandidates = buildEventCodeCandidates(eventCode);
 
-  var url = API_URL + "/team/" + encodeURIComponent(teamNum) + "?eventCode=" + encodeURIComponent(normalizedEventCode);
-  fetchWithAuth(url, {})
-    .then(function(res){
-      if(!res.ok){
-        if(res.status === 404){
-          return fetchLocalTeamStats(teamNum, [normalizedEventCode]).then(function(localStats){
-            renderTeamStatsCard(teamNum, normalizedEventCode, localStats);
-            log("Team route 404; loaded team stats from local reports", "info");
-            return null;
-          });
-        }
-        return res.json().catch(function(){ return {}; }).then(function(err){
-          var code = err && err.code ? (" [" + err.code + "]") : "";
-          throw new Error("HTTP " + res.status + code);
-        });
-      }
-      return res.json();
-    })
-    .then(function(stats){
-      if(!stats) return;
-      renderTeamStatsCard(teamNum, normalizedEventCode, stats);
-      log("Team stats loaded from backend", "success");
-    })
-    .catch(function(err){
-      log("Failed to fetch team stats: " + err.message, "error");
-      alert("Error fetching team stats: " + err.message + "\n\nExpected backend route: GET /team/:number?eventCode=XXXXX");
-    });
+  log("Fetching team stats for " + teamList.length + " team(s) (Event: " + normalizedEventCode + ")...", "info");
+
+  var jobs = teamList.map(function(teamNum){
+    return fetchSingleTeamStatsForPrint(teamNum, normalizedEventCode, eventCodeCandidates)
+      .then(function(result){
+        return { ok: true, teamNum: teamNum, result: result };
+      })
+      .catch(function(err){
+        return { ok: false, teamNum: teamNum, error: err && err.message ? err.message : "Unknown error" };
+      });
+  });
+
+  Promise.all(jobs).then(function(outcomes){
+    var okRows = outcomes.filter(function(x){ return x.ok; });
+    var failedRows = outcomes.filter(function(x){ return !x.ok; });
+
+    if(!okRows.length){
+      var firstErr = failedRows[0] ? failedRows[0].error : "No team stats found.";
+      log("Failed to fetch team stats: " + firstErr, "error");
+      alert("Error fetching team stats: " + firstErr);
+      return;
+    }
+
+    var multiMode = okRows.length > 1;
+    var sections = multiMode
+      ? buildMultiTeamStatsComparisonHtml(okRows, normalizedEventCode)
+      : buildTeamStatsTableSection(okRows[0].result.teamNum, normalizedEventCode, okRows[0].result.stats, okRows[0].result.source);
+
+    var failureBlock = "";
+    if(failedRows.length){
+      failureBlock = "<div style='margin-bottom:10px;padding:10px;border:1px solid #7f1d1d;background:rgba(127,29,29,.2);border-radius:8px;color:#fecaca;font-size:12px'><b>Some teams failed:</b> " + failedRows.map(function(f){ return f.teamNum + " (" + f.error + ")"; }).join(", ") + "</div>";
+    }
+
+    var html = "<div style='text-align:left'>" +
+      "<h2 style='margin:0 0 8px;color:#0a84ff'>Team Stats Deep Dive  " + normalizedEventCode.toUpperCase() + "</h2>" +
+      "<p style='color:#aaa;margin:0 0 14px;font-size:12px'>Loaded " + okRows.length + " team(s) in detailed table format.</p>" +
+      failureBlock + sections +
+    "</div>";
+
+    currentTeamStatsPrintPayload = {
+      html: html,
+      teamNums: okRows.map(function(r){ return r.result.teamNum; }),
+      eventCode: normalizedEventCode,
+      printStyle: multiMode
+        ? "@media print{@page{size:landscape;margin:0.18in} body{font-size:10px;color:#111} h1,h2,h3,p,div,td,th{color:#111 !important;line-height:1.14} table{width:100%} td,th{padding:3px 4px !important}}"
+        : "@media print{@page{size:portrait;margin:0.35in} body{font-size:11px;color:#111} h1,h2,h3,p,div,td,th{color:#111 !important}}"
+    };
+
+    $("team-stats-content").innerHTML = html;
+    $("team-stats-modal").classList.remove("hidden");
+    log("Team stats loaded for " + okRows.length + " team(s).", "success");
+  });
 }
 
 function renderTeamStatsCard(teamNum, eventCode, stats){
@@ -3434,6 +4388,12 @@ function renderTeamStatsCard(teamNum, eventCode, stats){
   
   html += "</div>";
   
+  currentTeamStatsPrintPayload = {
+    teamNum: teamNum,
+    eventCode: eventCode,
+    stats: stats
+  };
+
   $("team-stats-content").innerHTML = html;
   $("team-stats-modal").classList.remove("hidden");
 }
@@ -3506,6 +4466,289 @@ function ensureScheduleMap(eventKey, apiKey){
     log("Schedule fetch warning: " + err.message, "error");
     return null;
   });
+}
+
+function fetchTbaJson(url, apiKey){
+  return fetchTimeout(url, {
+    headers: { "X-TBA-Auth-Key": apiKey }
+  })
+  .then(function(res){
+    if(res.status === 404) return null;
+    if(!res.ok) throw new Error("TBA HTTP " + res.status);
+    return res.json();
+  });
+}
+
+function buildTbaEventKeyCandidates(){
+  var tba = getStoredTbaConfig();
+  var activeEvt = String(localStorage.getItem("@scanner_active_event") || "").trim().toLowerCase();
+  var sbYear = String(($("sb-year-input") && $("sb-year-input").value) || "").trim();
+  var sbEvt = String(($("sb-event-input") && $("sb-event-input").value) || "").trim().toLowerCase();
+  var thisYear = String(new Date().getFullYear());
+
+  var out = [];
+  function push(v){
+    if(!v) return;
+    v = String(v).trim().toLowerCase();
+    if(!v) return;
+    if(out.indexOf(v) === -1) out.push(v);
+  }
+
+  // Explicit key from UI/localStorage first.
+  push(tba.eventKey);
+
+  // If explicit key is short code, add year-prefixed forms.
+  var explicit = String(tba.eventKey || "").trim().toLowerCase();
+  if(explicit && !/^\d{4}/.test(explicit)){
+    push(thisYear + explicit);
+    if(sbYear && /^\d{4}$/.test(sbYear)) push(sbYear + explicit);
+  }
+
+  // Active event often stored as short code (e.g. pncmp).
+  if(activeEvt){
+    var normActive = activeEvt.replace(/^\d{4}/, "");
+    push(normActive);
+    push(thisYear + normActive);
+    if(sbYear && /^\d{4}$/.test(sbYear)) push(sbYear + normActive);
+  }
+
+  // Statbotics event helpers if present.
+  if(sbEvt){
+    push(sbEvt);
+    if(sbYear && /^\d{4}$/.test(sbYear)) push(sbYear + sbEvt);
+    push(thisYear + sbEvt);
+  }
+
+  return out;
+}
+
+function getStatboticsEventKeyFromInputs(){
+  var year = String(($("sb-year-input") && $("sb-year-input").value) || "").trim();
+  var evt = String(($("sb-event-input") && $("sb-event-input").value) || "").trim().toLowerCase();
+  if(year && evt && /^\d{4}$/.test(year)) return year + evt;
+
+  // Fallback 1: TBA event key from Single Match section/local storage.
+  var tba = getStoredTbaConfig();
+  var tbaKey = String((tba && tba.eventKey) || "").trim().toLowerCase();
+  if(/^\d{4}[a-z0-9]+$/.test(tbaKey)) return tbaKey;
+
+  // Fallback 2: Active event bucket (short code like pncmp -> 2026pncmp).
+  var activeEvt = String(localStorage.getItem("@scanner_active_event") || "").trim().toLowerCase();
+  if(!activeEvt) return "";
+  if(/^\d{4}[a-z0-9]+$/.test(activeEvt)) return activeEvt;
+
+  var code = activeEvt.replace(/^\d{4}/, "");
+  if(!code) return "";
+
+  var inferredYear = /^\d{4}$/.test(year) ? year : String(new Date().getFullYear());
+  return inferredYear + code;
+}
+
+function fetchStatboticsEventTeamMap(){
+  var eventKey = getStatboticsEventKeyFromInputs();
+  if(!eventKey) return Promise.resolve({});
+  if(statboticsEventCacheByEvent[eventKey]) return Promise.resolve(statboticsEventCacheByEvent[eventKey]);
+  if(!navigator.onLine) return Promise.resolve({});
+
+  return fetchTimeout("https://api.statbotics.io/v3/team_events?event=" + eventKey, {})
+    .then(function(res){
+      if(!res.ok) return {};
+      return res.json();
+    })
+    .then(function(rows){
+      var map = Object.create(null);
+      (Array.isArray(rows) ? rows : []).forEach(function(te){
+        var t = String(te && te.team);
+        var b = te && te.epa && te.epa.breakdown ? te.epa.breakdown : {};
+        if(!t) return;
+        map[t] = {
+          epaTotal: Number(b.total_points || 0),
+          epaAuto: Number(b.auto_points || 0),
+          epaTele: Number(b.teleop_points || 0),
+          predScore: Number(b.total_points || 0)
+        };
+      });
+      statboticsEventCacheByEvent[eventKey] = map;
+      return map;
+    })
+    .catch(function(){ return {}; });
+}
+
+function buildTbaDeepDiveData(teamNumber, eventKey, statusData, matches){
+  var teamKey = "frc" + String(teamNumber);
+  var list = Array.isArray(matches) ? matches.slice() : [];
+
+  var played = 0, wins = 0, losses = 0, ties = 0, upcoming = 0;
+  var sumFor = 0, sumAgainst = 0;
+  var matchRows = [];
+
+  list.forEach(function(m){
+    if(!m || m.comp_level !== "qm") return;
+
+    var red = (m.alliances && m.alliances.red) || {};
+    var blue = (m.alliances && m.alliances.blue) || {};
+    var redTeams = red.team_keys || [];
+    var blueTeams = blue.team_keys || [];
+    var inRed = redTeams.indexOf(teamKey) !== -1;
+    var inBlue = blueTeams.indexOf(teamKey) !== -1;
+    if(!inRed && !inBlue) return;
+
+    var myAlliance = inRed ? "RED" : "BLUE";
+    var myScore = inRed ? Number(red.score) : Number(blue.score);
+    var oppScore = inRed ? Number(blue.score) : Number(red.score);
+    var hasScore = myScore >= 0 && oppScore >= 0;
+
+    if(hasScore){
+      played++;
+      sumFor += myScore;
+      sumAgainst += oppScore;
+      if(myScore > oppScore) wins++;
+      else if(myScore < oppScore) losses++;
+      else ties++;
+    } else {
+      upcoming++;
+    }
+
+    matchRows.push({
+      matchNumber: m.match_number,
+      alliance: myAlliance,
+      forScore: hasScore ? myScore : null,
+      oppScore: hasScore ? oppScore : null,
+      result: hasScore ? (myScore > oppScore ? "W" : (myScore < oppScore ? "L" : "T")) : "UPCOMING"
+    });
+  });
+
+  matchRows.sort(function(a,b){ return (a.matchNumber || 0) - (b.matchNumber || 0); });
+
+  var qual = (statusData && statusData.qual) || {};
+  var ranking = qual.ranking || {};
+  var record = qual.record || {};
+  var alliance = (statusData && statusData.alliance) || {};
+  var playoff = (statusData && statusData.playoff) || {};
+
+  return {
+    teamNumber: teamNumber,
+    eventKey: eventKey,
+    overallStatus: (statusData && statusData.overall_status_str) || "-",
+    rank: ranking.rank != null ? ranking.rank : "-",
+    dq: ranking.dq != null ? ranking.dq : "-",
+    wins: record.wins != null ? record.wins : wins,
+    losses: record.losses != null ? record.losses : losses,
+    ties: record.ties != null ? record.ties : ties,
+    avgFor: played ? (sumFor / played).toFixed(1) : "-",
+    avgAgainst: played ? (sumAgainst / played).toFixed(1) : "-",
+    playedQuals: played,
+    upcomingQuals: upcoming,
+    allianceName: alliance.name || "-",
+    allianceNumber: alliance.number != null ? alliance.number : "-",
+    alliancePick: alliance.pick != null ? alliance.pick : "-",
+    playoffStatus: playoff.status || "-",
+    nextMatchKey: (statusData && statusData.next_match_key) || "-",
+    lastMatchKey: (statusData && statusData.last_match_key) || "-",
+    matches: matchRows
+  };
+}
+
+function renderTbaTeamStatsTable(tbaData){
+  if(!tbaData){
+    return "<div style='margin-top:10px;color:#ff9500;font-size:12px'>TBA data unavailable (set TBA Event Key/API Key in Single Match section).</div>";
+  }
+
+  var matchRows = (tbaData.matches || []).slice(0, 12).map(function(m){
+    var color = m.result === "W" ? "#16a34a" : (m.result === "L" ? "#dc2626" : (m.result === "T" ? "#d97706" : "#6b7280"));
+    var scoreText = (m.forScore == null || m.oppScore == null) ? "-" : (m.forScore + " - " + m.oppScore);
+    return "<tr>" +
+      "<td style='padding:6px;border:1px solid #333'>Q" + m.matchNumber + "</td>" +
+      "<td style='padding:6px;border:1px solid #333'>" + m.alliance + "</td>" +
+      "<td style='padding:6px;border:1px solid #333'>" + scoreText + "</td>" +
+      "<td style='padding:6px;border:1px solid #333;color:" + color + "'><b>" + m.result + "</b></td>" +
+    "</tr>";
+  }).join("");
+
+  return "<h4 style='margin:16px 0 8px;color:#60a5fa'>TBA Event Data (Team " + tbaData.teamNumber + ")</h4>" +
+    "<table style='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px'>" +
+      "<thead><tr style='background:#1f2937;color:#cbd5e1'><th style='padding:6px;border:1px solid #333;text-align:left'>Metric</th><th style='padding:6px;border:1px solid #333;text-align:left'>Value</th></tr></thead>" +
+      "<tbody>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Event Key</td><td style='padding:6px;border:1px solid #333'><b>" + tbaData.eventKey + "</b></td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Overall Status</td><td style='padding:6px;border:1px solid #333'>" + tbaData.overallStatus + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Rank / DQ</td><td style='padding:6px;border:1px solid #333'>" + tbaData.rank + " / " + tbaData.dq + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Record (W-L-T)</td><td style='padding:6px;border:1px solid #333'>" + tbaData.wins + "-" + tbaData.losses + "-" + tbaData.ties + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Avg Alliance For / Against</td><td style='padding:6px;border:1px solid #333'>" + tbaData.avgFor + " / " + tbaData.avgAgainst + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Qual Played / Upcoming</td><td style='padding:6px;border:1px solid #333'>" + tbaData.playedQuals + " / " + tbaData.upcomingQuals + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Alliance / Pick</td><td style='padding:6px;border:1px solid #333'>" + tbaData.allianceName + " (" + tbaData.allianceNumber + ") / " + tbaData.alliancePick + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Playoff Status</td><td style='padding:6px;border:1px solid #333'>" + tbaData.playoffStatus + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #333'>Last / Next Match</td><td style='padding:6px;border:1px solid #333'>" + tbaData.lastMatchKey + " / " + tbaData.nextMatchKey + "</td></tr>" +
+      "</tbody>" +
+    "</table>" +
+    "<table style='width:100%;border-collapse:collapse;font-size:12px'>" +
+      "<thead><tr style='background:#111827;color:#9ca3af'><th style='padding:6px;border:1px solid #333;text-align:left'>Qual</th><th style='padding:6px;border:1px solid #333;text-align:left'>Alliance</th><th style='padding:6px;border:1px solid #333;text-align:left'>Score (For-Against)</th><th style='padding:6px;border:1px solid #333;text-align:left'>Result</th></tr></thead>" +
+      "<tbody>" + (matchRows || "<tr><td colspan='4' style='padding:6px;border:1px solid #333;color:#9ca3af'>No TBA match rows available.</td></tr>") + "</tbody>" +
+    "</table>";
+}
+
+function renderLocalTeamFallbackTable(teamNumber, coreData){
+  if(!coreData){
+    return "<div style='margin-top:10px;color:#ff453a;font-size:12px'>No local fallback data available for Team " + teamNumber + ".</div>";
+  }
+
+  var hubAvg = coreData.hub && coreData.hub.scores ? coreData.hub.scores.avg : 0;
+  var hubStdev = coreData.hub && coreData.hub.scores ? coreData.hub.scores.stdev : 0;
+  var passAvg = coreData.passes ? coreData.passes.avg : 0;
+  var defended = coreData.teleop ? coreData.teleop.avgDefended : 0;
+  var defendedPct = Number(defended || 0);
+  if(defendedPct <= 1) defendedPct = defendedPct * 100;
+
+  return "<h4 style='margin:16px 0 8px;color:#f59e0b'>Local Fallback Data (Team " + teamNumber + ")</h4>" +
+    "<table style='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px'>" +
+      "<thead><tr style='background:#3f2f0b;color:#fef3c7'><th style='padding:6px;border:1px solid #6b4f12;text-align:left'>Metric</th><th style='padding:6px;border:1px solid #6b4f12;text-align:left'>Value</th></tr></thead>" +
+      "<tbody>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Matches In</td><td style='padding:6px;border:1px solid #6b4f12'><b>" + (coreData.matchesIn || 0) + "</b></td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Matches Missed</td><td style='padding:6px;border:1px solid #6b4f12'>" + (coreData.matchesMissed || 0) + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Incapacitated Matches</td><td style='padding:6px;border:1px solid #6b4f12'>" + (coreData.matchesIncapacitated || 0) + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Hub Avg (±Stdev)</td><td style='padding:6px;border:1px solid #6b4f12'>" + formatNum(hubAvg) + " (±" + formatNum(hubStdev) + ")</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Pass Avg</td><td style='padding:6px;border:1px solid #6b4f12'>" + formatNum(passAvg) + "</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Defended %</td><td style='padding:6px;border:1px solid #6b4f12'>" + formatNum(defendedPct) + "%</td></tr>" +
+        "<tr><td style='padding:6px;border:1px solid #6b4f12'>Avg Endgame Level</td><td style='padding:6px;border:1px solid #6b4f12'>" + formatNum(coreData.avgEndgameLevel) + "</td></tr>" +
+      "</tbody>" +
+    "</table>";
+}
+
+function fetchTbaTeamDeepDive(teamNumber){
+  var tba = getStoredTbaConfig();
+  if(!tba.apiKey) return Promise.resolve(null);
+
+  var teamKey = "frc" + String(teamNumber);
+  var candidateKeys = buildTbaEventKeyCandidates();
+  debugDeepDive("TBA candidate keys", { teamNumber: teamNumber, keys: candidateKeys });
+  if(!candidateKeys.length) return Promise.resolve(null);
+
+  var idx = 0;
+  function next(){
+    if(idx >= candidateKeys.length) return Promise.resolve(null);
+    var eventKey = candidateKeys[idx++];
+    var statusUrl = "https://www.thebluealliance.com/api/v3/team/" + teamKey + "/event/" + eventKey + "/status";
+    var matchesUrl = "https://www.thebluealliance.com/api/v3/team/" + teamKey + "/event/" + eventKey + "/matches/simple";
+
+    return Promise.all([
+      fetchTbaJson(statusUrl, tba.apiKey).catch(function(){ return null; }),
+      fetchTbaJson(matchesUrl, tba.apiKey).catch(function(){ return []; })
+    ]).then(function(parts){
+      var statusData = parts[0];
+      var matches = parts[1] || [];
+      var hasData = !!statusData || (Array.isArray(matches) && matches.length > 0);
+      debugDeepDive("TBA key attempt", {
+        teamNumber: teamNumber,
+        eventKey: eventKey,
+        hasStatus: !!statusData,
+        matchCount: Array.isArray(matches) ? matches.length : 0,
+        hasData: hasData
+      });
+      if(!hasData) return next();
+      return buildTbaDeepDiveData(teamNumber, eventKey, statusData, matches);
+    });
+  }
+
+  return next();
 }
 
 function fetchAllFullReports(){
@@ -3679,36 +4922,72 @@ function buildAllianceSummary(name, slots, teamStatsByNumber){
 }
 
 function buildMatchReportHTML(matchNum, redSlots, blueSlots, teamStatsByNumber, matchReportsByTeam, allConflicts){
-  var redSummary = buildAllianceSummary("Red", redSlots, teamStatsByNumber);
-  var blueSummary = buildAllianceSummary("Blue", blueSlots, teamStatsByNumber);
+  function fmt(v){
+    var n = Number(v || 0);
+    return isNaN(n) ? "0.0" : n.toFixed(1);
+  }
 
-  var redHtml = redSlots.map(function(slot){
-    return teamBoxHtml(slot.slot, slot.team, teamStatsByNumber[slot.team], matchReportsByTeam[slot.team] || [], slot.conflicts || []);
-  }).join("");
-  var blueHtml = blueSlots.map(function(slot){
-    return teamBoxHtml(slot.slot, slot.team, teamStatsByNumber[slot.team], matchReportsByTeam[slot.team] || [], slot.conflicts || []);
-  }).join("");
+  function compactTeamPage(slot){
+    var team = slot.team;
+    var side = slot.slot.indexOf("Red") === 0 ? "Red" : "Blue";
+    var sideColor = side === "Red" ? "#b91c1c" : "#1d4ed8";
+    var stats = teamStatsByNumber[team];
+    var inMatchReports = matchReportsByTeam[team] || [];
+    var one = inMatchReports[0] || null;
 
-  var conflictHtml = allConflicts.length
-    ? "<ul style='margin:6px 0 0 18px;padding:0'>" + allConflicts.map(function(c){ return "<li>" + c + "</li>"; }).join("") + "</ul>"
-    : "<div style='color:#15803d'>No major conflicts detected for this match.</div>";
+    if(!team){
+      return "<section class='team-page' style='page-break-after:always;padding:8px 0'>" +
+        "<h2 style='margin:0 0 10px;color:#111'>Match " + matchNum + " - " + slot.slot + "</h2>" +
+        "<p style='color:#666'>No team mapped for this station.</p>" +
+      "</section>";
+    }
 
-  return "<h1 style='margin-bottom:4px'>Match "+matchNum+" - All 6 Team Report</h1>" +
-    "<p style='color:#666;margin-top:0'>One-page view with Red/Blue grouping, position mapping, team summaries, and conflicts.</p>" +
-    "<div style='display:grid;grid-template-columns:1fr 1fr;gap:14px'>" +
-      "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;background:#fff5f5'>" +
-        "<h2 style='margin:0 0 8px 0;color:#b91c1c'>Red Alliance</h2>" +
-        "<div style='font-size:12px;margin-bottom:8px'><b>3-Team Avg:</b> Auto "+redSummary.avg3Auto+" | Tele "+redSummary.avg3Tele+" | Total "+redSummary.avg3Total+"</div>" +
-        redHtml +
-      "</div>" +
-      "<div style='border:1px solid #ddd;border-radius:8px;padding:12px;background:#eff6ff'>" +
-        "<h2 style='margin:0 0 8px 0;color:#1d4ed8'>Blue Alliance</h2>" +
-        "<div style='font-size:12px;margin-bottom:8px'><b>3-Team Avg:</b> Auto "+blueSummary.avg3Auto+" | Tele "+blueSummary.avg3Tele+" | Total "+blueSummary.avg3Total+"</div>" +
-        blueHtml +
-      "</div>" +
-    "</div>" +
-    "<h2 style='margin-top:14px'>Conflicts</h2>" +
-    conflictHtml;
+    if(!stats || stats.matchesPlayed === 0){
+      return "<section class='team-page' style='page-break-after:always;padding:8px 0'>" +
+        "<h2 style='margin:0 0 4px;color:#111'>Team " + team + " - " + slot.slot + "</h2>" +
+        "<p style='margin:0 0 10px;color:" + sideColor + "'><b>Match " + matchNum + " | " + side + " Alliance</b></p>" +
+        "<table style='width:100%;border-collapse:collapse;font-size:12px'>" +
+          "<thead><tr style='background:#f3f4f6'><th style='border:1px solid #ccc;padding:6px;text-align:left'>Metric</th><th style='border:1px solid #ccc;padding:6px;text-align:left'>Value</th></tr></thead>" +
+          "<tbody><tr><td style='border:1px solid #ccc;padding:6px'>Status</td><td style='border:1px solid #ccc;padding:6px'>No scouting data yet for this team.</td></tr></tbody>" +
+        "</table>" +
+      "</section>";
+    }
+
+    var curAuto = one ? (parseInt((one.auto && one.auto.hubScores) || 0, 10) || 0) : "-";
+    var curTele = one ? (parseInt((one.teleop && one.teleop.hubScores) || 0, 10) || 0) : "-";
+    var curEnd = one ? ((one.endgame && one.endgame.climbFailed) ? "Failed" : "L" + String((one.endgame && one.endgame.level) || 0)) : "-";
+    var curFerry = one ? (parseInt((one.teleop && one.teleop.passes) || 0, 10) || 0) : "-";
+    var conflictText = (slot.conflicts && slot.conflicts.length) ? slot.conflicts.join("; ") : "None";
+
+    return "<section class='team-page' style='page-break-after:always;padding:8px 0'>" +
+      "<h2 style='margin:0 0 4px;color:#111'>Team " + team + " - " + slot.slot + "</h2>" +
+      "<p style='margin:0 0 10px;color:" + sideColor + "'><b>Match " + matchNum + " | " + side + " Alliance</b></p>" +
+      "<table style='width:100%;border-collapse:collapse;font-size:12px'>" +
+        "<thead><tr style='background:#f3f4f6'><th style='border:1px solid #ccc;padding:6px;text-align:left;width:35%'>Metric</th><th style='border:1px solid #ccc;padding:6px;text-align:left'>Value</th></tr></thead>" +
+        "<tbody>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Current Match Auto / Tele / End</td><td style='border:1px solid #ccc;padding:6px'><b>" + curAuto + " / " + curTele + " / " + curEnd + "</b></td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Current Match Ferry</td><td style='border:1px solid #ccc;padding:6px'>" + curFerry + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Avg Auto Hub / Max</td><td style='border:1px solid #ccc;padding:6px'>" + fmt(stats.avgAutoHub) + " / " + stats.maxAutoHub + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Avg Tele Hub / Max</td><td style='border:1px solid #ccc;padding:6px'>" + fmt(stats.avgTeleHub) + " / " + stats.maxTeleHub + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Avg Total Score</td><td style='border:1px solid #ccc;padding:6px'>" + fmt(stats.avgScore) + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Avg Ferry</td><td style='border:1px solid #ccc;padding:6px'>" + fmt(stats.avgFerry) + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Climb Success / Attempts</td><td style='border:1px solid #ccc;padding:6px'>" + stats.climbSuccesses + " / " + stats.climbAttempts + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Dead % / Avg Incap</td><td style='border:1px solid #ccc;padding:6px'>" + stats.deadPct + " / " + fmt(stats.avgIncap) + "s</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Defended %</td><td style='border:1px solid #ccc;padding:6px'>" + stats.defendedPct + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Dominant Auto Start</td><td style='border:1px solid #ccc;padding:6px'>" + (stats.dominantStart || "Unknown") + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Conflicts</td><td style='border:1px solid #ccc;padding:6px'>" + conflictText + "</td></tr>" +
+          "<tr><td style='border:1px solid #ccc;padding:6px'>Samples</td><td style='border:1px solid #ccc;padding:6px'>" + stats.matchesPlayed + " total matches</td></tr>" +
+        "</tbody>" +
+      "</table>" +
+    "</section>";
+  }
+
+  var slots = redSlots.concat(blueSlots);
+  var pages = slots.map(function(s){ return compactTeamPage(s); }).join("");
+
+  return "<h1 style='margin:0 0 6px'>Match " + matchNum + " - Drive Team Sheets (6 Teams)</h1>" +
+    "<p style='margin:0 0 10px;color:#555;font-size:12px'>Compact one-page table per team. Print and hand to drive coach.</p>" +
+    pages;
 }
 
 function printMatchReportFromInput(){
@@ -3717,12 +4996,18 @@ function printMatchReportFromInput(){
     alert("Enter a valid match number.");
     return;
   }
-  printMatchReport(matchNum);
+  var preloadWindow = window.open("", "", "width=1000,height=700");
+  if(preloadWindow){
+    preloadWindow.document.write("<html><head><title>Preparing Match Report</title></head><body style='font-family:sans-serif;padding:24px'><h2 style='margin-top:0'>Preparing Match " + matchNum + " report...</h2><p>Please wait while data loads.</p></body></html>");
+    preloadWindow.document.close();
+  }
+  printMatchReport(matchNum, preloadWindow);
 }
 
-function printMatchReport(matchNum){
+function printMatchReport(matchNum, preloadWindow){
   if(!AUTH_TOKEN){
     alert("Please connect to backend first.");
+    if(preloadWindow && !preloadWindow.closed) preloadWindow.close();
     return;
   }
 
@@ -3842,10 +5127,13 @@ function printMatchReport(matchNum){
       });
 
       var html = buildMatchReportHTML(matchNum, redSlots, blueSlots, teamStatsByNumber, reportsInMatchByTeam, allConflicts);
-      openPrint(html, "@media print{@page{size:landscape}} body{font-size:12px}");
+      openPrint(html, "@media print{@page{size:portrait;margin:0.45in}} body{font-size:12px}", true, preloadWindow);
       log("Match " + matchNum + " report ready.", "success");
     })
     .catch(function(err){
+      if(preloadWindow && !preloadWindow.closed){
+        preloadWindow.document.body.innerHTML = "<h2 style='margin-top:0;color:#b91c1c'>Could not generate Match " + matchNum + " report</h2><p>" + (err && err.message ? err.message : "Unknown error") + "</p>";
+      }
       log("Match report error: " + err.message, "error");
     });
 }
@@ -3970,8 +5258,13 @@ function renderRankingsHTML(list, limit, metricLabel, metric) {
   openPrint("<h1>Event Rankings: Top " + limit + " Teams</h1><h3 style='margin-top:0;color:#555'>Sorted by: " + metricLabel + "</h3><table style='width:100%;border-collapse:collapse;text-align:left;font-size:12px'><thead><tr style='background:#f0f0f0'><th style='padding:10px'>Rank</th><th style='padding:10px'>Team</th><th style='padding:10px'>Avg Total</th><th style='padding:10px'>EPA Total</th><th style='padding:10px'>EPA Auto</th><th style='padding:10px'>EPA Tele</th><th style='padding:10px'>Auto Pts</th><th style='padding:10px'>Tele Hubs</th><th style='padding:10px'>Ferry</th><th style='padding:10px'>Endgame Pts</th><th style='padding:10px'>Auto L1/L2/L3/L4</th><th style='padding:10px'>Tele L1/L2/L3/L4</th><th style='padding:10px'>Auto/Tele Passes</th><th style='padding:10px'>Defended %</th><th style='padding:10px'>Climb S/A</th><th style='padding:10px'>Matches</th></tr></thead><tbody>"+rows+"</tbody></table>", "@media print{@page{size:landscape}}");
 }
 
-function openPrint(html, extraStyle){
-  var w = window.open("","","width=1000,height=700");
+function openPrint(html, extraStyle, autoPrint, existingWindow){
+  if(autoPrint === undefined) autoPrint = true;
+  var w = existingWindow && !existingWindow.closed ? existingWindow : window.open("", "","width=1000,height=700");
+  if(!w){
+    alert("Popup blocked. Please allow popups for this page and try again.");
+    return;
+  }
   w.document.write("<html><head><title>Scouting Report</title><style>"+
     "body{font-family:sans-serif;padding:30px;font-size:13px}"+
     "h1{border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:6px}"+
@@ -3984,6 +5277,9 @@ function openPrint(html, extraStyle){
     "</body></html>");
   w.document.close();
   w.focus();
+  if(autoPrint){
+    w.print();
+  }
 }
 
 // ─── FILE UPLOAD ─────────────────────────────────────────────────────────────
@@ -4031,6 +5327,7 @@ window.addEventListener("resize", normalizeCameraViewport);
 window.addEventListener("orientationchange", normalizeCameraViewport);
 normalizeCameraViewport();
 renderEventUI(); // Boot up event UI filter list
+refreshDeepDiveDebugUi();
 </script>
 </body>
 </html>

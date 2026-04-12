@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -29,6 +29,17 @@ const DEFAULT_SCHEDULE: any = {};
 
 // Static lists for our UI buttons
 const STATIONS = ["Red1", "Red2", "Red3", "Blue1", "Blue2", "Blue3"];
+const MATCH_TYPES = ["Qual", "Play"] as const;
+const MATCH_STAGES = [
+  { key: "QUALIFICATION", label: "Qualification" },
+  { key: "LOWER", label: "Lower Bracket" },
+  { key: "UPPER", label: "Upper Bracket" },
+  { key: "SEMIFINAL", label: "Semifinal" },
+  { key: "FINAL", label: "Final" },
+] as const;
+const PLAYOFF_BRACKET_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8];
+const FINAL_MATCH_NUMBERS = [1, 2, 3];
+const PLAYOFF_POLL_INTERVAL_MS = 60000;
 const AUTO_POSITIONS = ["Left", "Center", "Right"];
 const PASS_VOLUMES = ["None", "Low", "Med", "High"];
 const AUTO_WINNERS = ["Red", "Blue", "Tie"];
@@ -50,13 +61,18 @@ const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 8000) => {
 // Data models
 type ViewState = "login" | "dashboard" | "scouting" | "pit";
 type Station = "Red1" | "Red2" | "Red3" | "Blue1" | "Blue2" | "Blue3";
+type MatchType = "Qual" | "Prac" | "Play";
+type MatchStage = "QUALIFICATION" | "LOWER" | "UPPER" | "SEMIFINAL" | "FINAL";
 
 interface MatchData {
   matchNumber: string;
+  playoffKey: string;
+  matchStage: MatchStage;
+  playoffBracketNumber: string;
   teamNumber: string;
   scouter: string;
   eventCode: string;
-  matchType: "Qual" | "Prac" | "Play";
+  matchType: MatchType;
   station: Station;
   startPos: "Left" | "Center" | "Right";
   autoMake: number;
@@ -96,9 +112,12 @@ interface HistoryItem {
 // The baseline state for a new match.
 const INITIAL_MATCH_DATA: MatchData = {
   scouter: "",
-  eventCode: "2026A",
+  eventCode: "pncmp",
   matchType: "Qual",
-  matchNumber: "1",
+  matchNumber: "",
+  playoffKey: "",
+  matchStage: "QUALIFICATION",
+  playoffBracketNumber: "1",
   teamNumber: "",
   station: "Red1",
   startPos: "Center",
@@ -262,6 +281,112 @@ const suggestMinusIncrement = (suggestedPlus: number): number => {
   if (suggestedPlus === 10) return 5;
   if (suggestedPlus === 5) return 3;
   return 1;
+};
+
+const normalizePlayoffRef = (rawRef: string): string => {
+  const cleaned = (rawRef || "")
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/[-_]/g, "");
+
+  if (!cleaned) return "";
+  if (/^F\d+$/.test(cleaned)) return cleaned;
+
+  const bracketMatch = cleaned.match(/^(EF|QF|SF)(\d+)(?:M)?(\d+)$/);
+  if (bracketMatch) {
+    return `${bracketMatch[1]}${bracketMatch[2]}M${bracketMatch[3]}`;
+  }
+
+  return cleaned;
+};
+
+const encodePlayoffRef = (playoffRef: string): number => {
+  const normalized = normalizePlayoffRef(playoffRef);
+  const finalMatch = normalized.match(/^F(\d+)$/);
+  if (finalMatch) {
+    return 4000 + (parseInt(finalMatch[1], 10) || 0);
+  }
+
+  const bracketMatch = normalized.match(/^(EF|QF|SF)(\d+)M(\d+)$/);
+  if (bracketMatch) {
+    const baseMap: Record<string, number> = {
+      EF: 1000,
+      QF: 2000,
+      SF: 3000,
+    };
+    const setNum = parseInt(bracketMatch[2], 10) || 0;
+    const matchNum = parseInt(bracketMatch[3], 10) || 0;
+    return baseMap[bracketMatch[1]] + setNum * 10 + matchNum;
+  }
+
+  return Math.max(1, parseInt(normalized, 10) || 1);
+};
+
+const buildPlayoffRefFromStage = (
+  stage: MatchStage,
+  playoffBracketNumber: string,
+  matchNumber: string,
+): string => {
+  const cleanBracket = String(parseInt(playoffBracketNumber || "", 10) || "");
+  const cleanMatch = String(parseInt(matchNumber || "", 10) || "");
+  if (!cleanMatch) return "";
+
+  switch (stage) {
+    case "LOWER":
+      return cleanBracket ? `EF${cleanBracket}M${cleanMatch}` : "";
+    case "UPPER":
+      return cleanBracket ? `QF${cleanBracket}M${cleanMatch}` : "";
+    case "SEMIFINAL":
+      return cleanBracket ? `SF${cleanBracket}M${cleanMatch}` : "";
+    case "FINAL":
+      return `F${cleanMatch}`;
+    default:
+      return "";
+  }
+};
+
+const buildScheduleKey = (matchType: MatchType, matchNumber: string, playoffKey: string): string => {
+  if (matchType === "Play") {
+    return normalizePlayoffRef(playoffKey || matchNumber);
+  }
+
+  const qualMatchNumber = parseInt(matchNumber || "", 10);
+  if (Number.isNaN(qualMatchNumber) || qualMatchNumber < 1) return "";
+  return String(qualMatchNumber);
+};
+
+const incrementPlayoffRef = (playoffRef: string): string => {
+  const normalized = normalizePlayoffRef(playoffRef);
+
+  const finalMatch = normalized.match(/^F(\d+)$/);
+  if (finalMatch) {
+    return `F${(parseInt(finalMatch[1], 10) || 0) + 1}`;
+  }
+
+  const bracketMatch = normalized.match(/^(EF|QF|SF)(\d+)M(\d+)$/);
+  if (bracketMatch) {
+    return `${bracketMatch[1]}${bracketMatch[2]}M${(parseInt(bracketMatch[3], 10) || 0) + 1}`;
+  }
+
+  return normalized;
+};
+
+const getPlayoffKeyFromTbaMatch = (match: any): string | null => {
+  const levelMap: Record<string, string> = {
+    ef: "EF",
+    qf: "QF",
+    sf: "SF",
+    f: "F",
+  };
+  const level = levelMap[match.comp_level];
+  if (!level) return null;
+
+  const matchNum = parseInt(String(match.match_number || 0), 10) || 0;
+  const setNum = parseInt(String(match.set_number || 0), 10) || 0;
+  if (level === "F") {
+    return `F${matchNum}`;
+  }
+  return `${level}${setNum}M${matchNum}`;
 };
 
 // Screens
@@ -727,6 +852,77 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
         {/* --- Match Setup --- */}
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Match Info</Text>
+
+          <Text style={styles.label}>Match Stage</Text>
+          <View style={styles.optionRow}>
+            {MATCH_STAGES.map((stageOption) => (
+              <OptionButton
+                key={stageOption.key}
+                label={stageOption.label}
+                selected={form.matchStage === stageOption.key}
+                onPress={() =>
+                  setForm((p: any) => ({
+                    ...p,
+                    matchStage: stageOption.key,
+                    matchType: stageOption.key === "QUALIFICATION" ? "Qual" : "Play",
+                    playoffBracketNumber:
+                      stageOption.key === "QUALIFICATION" || stageOption.key === "FINAL"
+                        ? p.playoffBracketNumber
+                        : p.playoffBracketNumber || "1",
+                  }))
+                }
+              />
+            ))}
+          </View>
+
+          {form.matchStage !== "QUALIFICATION" && form.matchStage !== "FINAL" && (
+            <>
+              <Text style={styles.label}>Bracket Number</Text>
+              <View style={styles.optionRow}>
+                {PLAYOFF_BRACKET_NUMBERS.map((bracketNum) => (
+                  <OptionButton
+                    key={`bracket-${bracketNum}`}
+                    label={String(bracketNum)}
+                    selected={form.playoffBracketNumber === String(bracketNum)}
+                    onPress={() =>
+                      setForm((p: any) => ({
+                        ...p,
+                        playoffBracketNumber: String(bracketNum),
+                      }))
+                    }
+                  />
+                ))}
+              </View>
+            </>
+          )}
+
+          {form.matchStage === "FINAL" && (
+            <>
+              <Text style={styles.label}>Final Match</Text>
+              <View style={styles.optionRow}>
+                {FINAL_MATCH_NUMBERS.map((finalMatchNum) => (
+                  <OptionButton
+                    key={`final-${finalMatchNum}`}
+                    label={String(finalMatchNum)}
+                    selected={form.matchNumber === String(finalMatchNum)}
+                    onPress={() =>
+                      setForm((p: any) => ({
+                        ...p,
+                        matchNumber: String(finalMatchNum),
+                      }))
+                    }
+                  />
+                ))}
+              </View>
+            </>
+          )}
+
+          {form.matchStage !== "QUALIFICATION" && (
+            <Text style={styles.tinyTextLight}>
+              Enter Match # only. Bracket ref is auto-built from stage + bracket + match.
+            </Text>
+          )}
+
           <View style={styles.inputRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.label}>Match #</Text>
@@ -734,6 +930,8 @@ const ScoutingFormView = ({ form, setForm, station, onSave, onCancel, ballIncrem
                 style={styles.input}
                 keyboardType="numeric"
                 value={form.matchNumber}
+                placeholder="1"
+                placeholderTextColor="#666"
                 onChangeText={(t) =>
                   setForm((p: any) => ({ ...p, matchNumber: t }))
                 }
@@ -1093,6 +1291,7 @@ export default function App() {
   const [apiUrlInput, setApiUrlInput] = useState("");
 
   const [form, setForm] = useState<MatchData>(INITIAL_MATCH_DATA);
+  const tbaPollInFlightRef = useRef(false);
 
   useEffect(() => {
     AsyncStorage.getItem("@scout_username").then((u) => {
@@ -1159,15 +1358,84 @@ export default function App() {
   }, [username]);
 
   useEffect(() => {
-    if (form.matchType === 'Qual' && station) {
-      if (schedule && schedule[form.matchNumber] && schedule[form.matchNumber][station]) {
-        const assigned = schedule[form.matchNumber][station];
-        setForm(p => ({ ...p, teamNumber: assigned, station }));
-      } else if (schedule && Object.keys(schedule).length > 0) {
-        setForm(p => ({ ...p, teamNumber: '', station }));
+    if (form.matchType !== "Play") {
+      if (form.playoffKey) {
+        setForm((p) => ({ ...p, playoffKey: "" }));
       }
+      return;
     }
-  }, [form.matchNumber, station, form.matchType]);
+
+    const derivedPlayoffRef = normalizePlayoffRef(
+      buildPlayoffRefFromStage(
+        form.matchStage,
+        form.playoffBracketNumber,
+        form.matchNumber,
+      ),
+    );
+
+    if (derivedPlayoffRef !== form.playoffKey) {
+      setForm((p) => ({ ...p, playoffKey: derivedPlayoffRef }));
+    }
+  }, [
+    form.matchType,
+    form.matchStage,
+    form.playoffBracketNumber,
+    form.matchNumber,
+    form.playoffKey,
+  ]);
+
+  useEffect(() => {
+    if (!station) return;
+
+    const lookupKey = buildScheduleKey(form.matchType, form.matchNumber, form.playoffKey);
+    const scheduleEntry = schedule && lookupKey ? schedule[lookupKey] : null;
+
+    if (scheduleEntry && scheduleEntry[station]) {
+      const assigned = scheduleEntry[station];
+      setForm((p) => ({
+        ...p,
+        teamNumber: assigned,
+        station,
+        playoffKey:
+          p.matchType === "Play" && !p.playoffKey
+            ? lookupKey
+            : p.playoffKey,
+      }));
+    } else if (schedule && Object.keys(schedule).length > 0) {
+      // Keep manual playoff team overrides intact when bracket data is not yet posted.
+      setForm((p) => ({
+        ...p,
+        teamNumber: p.matchType === "Qual" ? "" : p.teamNumber,
+        station,
+      }));
+    } else {
+      setForm((p) => ({ ...p, station }));
+    }
+  }, [form.matchNumber, form.playoffKey, station, form.matchType, schedule]);
+
+  useEffect(() => {
+    // If a scouter starts typing match numbers before fetching schedule, do a silent bootstrap fetch.
+    if (Object.keys(schedule || {}).length > 0) return;
+    if (!tbaEventKey || !process.env.EXPO_PUBLIC_TBA_API_KEY) return;
+    if (!form.matchNumber) return;
+    if (tbaPollInFlightRef.current) return;
+
+    let cancelled = false;
+    const bootstrap = async () => {
+      if (cancelled || tbaPollInFlightRef.current) return;
+      tbaPollInFlightRef.current = true;
+      try {
+        await fetchAndStoreTbaSchedule({ silent: true, showSpinner: false });
+      } finally {
+        tbaPollInFlightRef.current = false;
+      }
+    };
+
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.matchNumber, tbaEventKey, schedule]);
 
   const handleLogin = async () => {
     setErrorMessage("");
@@ -1279,10 +1547,26 @@ export default function App() {
   };
 
   const handleSaveMatch = async () => {
-    if (!form.teamNumber || !form.matchNumber) {
+    const parsedMatchNumber = parseInt(form.matchNumber || "", 10);
+    if (!form.teamNumber || !form.matchNumber || Number.isNaN(parsedMatchNumber) || parsedMatchNumber < 1) {
       Alert.alert("Missing Info", "Check Team/Match Number");
       return;
     }
+
+    if (form.matchStage === "FINAL" && (parsedMatchNumber < 1 || parsedMatchNumber > 3)) {
+      Alert.alert("Invalid Final Match", "Final match number must be 1, 2, or 3.");
+      return;
+    }
+
+    const isPlayoffMatch = form.matchType === "Play";
+    const normalizedQualMatchNumber = Math.max(1, parsedMatchNumber);
+    const playoffReference = normalizePlayoffRef(form.playoffKey || form.matchNumber);
+    const matchReferenceForExport = isPlayoffMatch
+      ? playoffReference || `F${normalizedQualMatchNumber}`
+      : String(normalizedQualMatchNumber);
+    const backendMatchNumber = isPlayoffMatch
+      ? encodePlayoffRef(matchReferenceForExport)
+      : normalizedQualMatchNumber;
 
     const effectiveDeadTime = form.incapacitated ? form.deadTime || "150" : "0";
 
@@ -1292,12 +1576,15 @@ export default function App() {
     // Prevent any delimiters breaking the payload
     const safeAutoNotes = form.autoNotes.replace(/\|/g, "");
     const safeTeleNotes = form.teleNotes.replace(/\|/g, "");
-    const fullNotes = parsedNotes ? parsedNotes : `${extraData} | `;
+    const baseNotes = parsedNotes ? parsedNotes : `${extraData} | `;
+    const fullNotes = isPlayoffMatch
+      ? `[MatchRef:${matchReferenceForExport}] ${baseNotes}`
+      : baseNotes;
 
     // Assemble the QR string EXACTLY matching the indices expected by scanner.html
     const dataString = [
       form.eventCode,                                            // 0
-      form.matchNumber,                                          // 1
+      matchReferenceForExport,                                   // 1
       form.teamNumber,                                           // 2
       username,                                                  // 3
       form.startPos,                                             // 4
@@ -1321,10 +1608,11 @@ export default function App() {
       form.fouls,                                                // 22
       form.majorFouls,                                           // 23
       form.shootingConfidence,                                   // 24
-      form.wasDefended                                           // 25
+      form.wasDefended,                                          // 25
+      matchReferenceForExport,                                   // 26
+      form.matchType                                             // 27
     ].join('|');
 
-    const normalizedMatchNumber = Math.max(1, parseInt(form.matchNumber || "1", 10) || 1);
     const normalizedTeamNumber = Math.max(1, parseInt(form.teamNumber || "1", 10) || 1);
     const normalizedMinorFouls = Math.max(0, parseInt(String(form.fouls), 10) || 0);
     const normalizedMajorFouls = Math.max(0, parseInt(String(form.majorFouls), 10) || 0);
@@ -1335,8 +1623,8 @@ export default function App() {
     const reportPayload = {
       createdAt: new Date().toISOString(),
       eventCode: form.eventCode.substring(0, 5).padEnd(5, "A"),
-      matchType: form.matchType === "Play" ? "PLAYOFF" : "QUALIFICATION",
-      matchNumber: normalizedMatchNumber,
+      matchType: isPlayoffMatch ? "PLAYOFF" : "QUALIFICATION",
+      matchNumber: backendMatchNumber,
       alliance: station && station.startsWith('Blue') ? 'BLUE' : 'RED',
       teamNumber: normalizedTeamNumber,
       inMatch: true,
@@ -1429,7 +1717,7 @@ export default function App() {
 
     const newRecord: HistoryItem = {
       id: Date.now().toString(),
-      matchNum: form.matchNumber,
+      matchNum: matchReferenceForExport,
       teamNum: form.teamNumber,
       qrString: dataString,
     };
@@ -1456,8 +1744,11 @@ export default function App() {
       newMatchesScouted.toString(),
     );
 
-    // Automatically increment the match number for the next round
+    // Automatically increment qualification matches only; playoff refs are sequence-based.
     const nextMatch = (parseInt(form.matchNumber, 10) + 1).toString();
+    const nextPlayoffRef = isPlayoffMatch
+      ? incrementPlayoffRef(matchReferenceForExport)
+      : "";
 
     // Check if the scouter is building up too many local un-scanned codes
     if (newQueue.length >= 3) {
@@ -1474,7 +1765,9 @@ export default function App() {
     // Wipe out the old data, but keep the meta data (like the new match number)
     setForm({
       ...INITIAL_MATCH_DATA,
-      matchNumber: nextMatch,
+      matchType: form.matchType,
+      matchNumber: isPlayoffMatch ? form.matchNumber : nextMatch,
+      playoffKey: nextPlayoffRef,
     });
 
     setCurrentView("dashboard");
@@ -1486,17 +1779,25 @@ export default function App() {
     setShowQR(false);
   };
 
-  const handleFetchTba = async () => {
+  const fetchAndStoreTbaSchedule = async ({
+    silent = false,
+    showSpinner = false,
+  }: {
+    silent?: boolean;
+    showSpinner?: boolean;
+  } = {}) => {
     const tbaApiKey = process.env.EXPO_PUBLIC_TBA_API_KEY;
     if (!tbaEventKey || !tbaApiKey) {
-      Alert.alert(
-        "Missing Info",
-        "Please provide a TBA Event Key. The API key must be set in the .env file as EXPO_PUBLIC_TBA_API_KEY.",
-      );
+      if (!silent) {
+        Alert.alert(
+          "Missing Info",
+          "Please provide a TBA Event Key. The API key must be set in the .env file as EXPO_PUBLIC_TBA_API_KEY.",
+        );
+      }
       return;
     }
 
-    setIsFetchingTba(true);
+    if (showSpinner) setIsFetchingTba(true);
     try {
       await AsyncStorage.setItem("@tba_event_key", tbaEventKey);
 
@@ -1515,26 +1816,43 @@ export default function App() {
 
       const data = await res.json();
       const newSchedule: any = {};
+      let qualCount = 0;
+      let playoffCount = 0;
 
       data.forEach((match: any) => {
-        if (match.comp_level === "qm") {
-          const matchNum = match.match_number;
-          const redTeams = match.alliances.red.team_keys.map((k: string) =>
-            k.replace("frc", ""),
-          );
-          const blueTeams = match.alliances.blue.team_keys.map((k: string) =>
-            k.replace("frc", ""),
-          );
+        const redTeams = match.alliances.red.team_keys.map((k: string) =>
+          k.replace("frc", ""),
+        );
+        const blueTeams = match.alliances.blue.team_keys.map((k: string) =>
+          k.replace("frc", ""),
+        );
 
-          newSchedule[matchNum] = {
-            Red1: redTeams[0],
-            Red2: redTeams[1],
-            Red3: redTeams[2],
-            Blue1: blueTeams[0],
-            Blue2: blueTeams[1],
-            Blue3: blueTeams[2],
-          };
+        let scheduleKey: string | null = null;
+        let scheduleType: MatchType = "Qual";
+
+        if (match.comp_level === "qm") {
+          scheduleKey = String(match.match_number);
+          scheduleType = "Qual";
+          qualCount += 1;
+        } else {
+          scheduleKey = getPlayoffKeyFromTbaMatch(match);
+          if (scheduleKey) {
+            scheduleType = "Play";
+            playoffCount += 1;
+          }
         }
+
+        if (!scheduleKey) return;
+
+        newSchedule[scheduleKey] = {
+          Red1: redTeams[0],
+          Red2: redTeams[1],
+          Red3: redTeams[2],
+          Blue1: blueTeams[0],
+          Blue2: blueTeams[1],
+          Blue3: blueTeams[2],
+          _matchType: scheduleType,
+        };
       });
 
       setSchedule(newSchedule);
@@ -1542,15 +1860,55 @@ export default function App() {
         "@match_schedule",
         JSON.stringify(newSchedule),
       );
-      Alert.alert(
-        "Success",
-        `Loaded schedule for ${Object.keys(newSchedule).length} qualification matches!`,
-      );
+      if (!silent) {
+        Alert.alert(
+          "Success",
+          `Loaded ${qualCount} qualification and ${playoffCount} playoff matches (${Object.keys(newSchedule).length} total).`,
+        );
+      }
     } catch (e: any) {
-      Alert.alert("TBA Error", e.message || "Could not fetch match schedule.");
+      if (!silent) {
+        Alert.alert("TBA Error", e.message || "Could not fetch match schedule.");
+      } else {
+        // Silent polling should never interrupt active scouting flow.
+        console.log("[TBA poll] schedule refresh skipped:", e?.message || e);
+      }
     }
-    setIsFetchingTba(false);
+    if (showSpinner) setIsFetchingTba(false);
   };
+
+  const handleFetchTba = async () => {
+    await fetchAndStoreTbaSchedule({ silent: false, showSpinner: true });
+  };
+
+  useEffect(() => {
+    const shouldPollPlayoffs =
+      currentView === "scouting" &&
+      form.matchType === "Play" &&
+      !!tbaEventKey &&
+      !!process.env.EXPO_PUBLIC_TBA_API_KEY;
+
+    if (!shouldPollPlayoffs) return;
+
+    let cancelled = false;
+    const pollOnce = async () => {
+      if (cancelled || tbaPollInFlightRef.current) return;
+      tbaPollInFlightRef.current = true;
+      try {
+        await fetchAndStoreTbaSchedule({ silent: true, showSpinner: false });
+      } finally {
+        tbaPollInFlightRef.current = false;
+      }
+    };
+
+    pollOnce();
+    const intervalId = setInterval(pollOnce, PLAYOFF_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [currentView, form.matchType, tbaEventKey]);
 
   return (
     <SafeAreaView style={styles.safeArea}>

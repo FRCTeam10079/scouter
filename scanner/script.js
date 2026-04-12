@@ -265,7 +265,7 @@ function sanitizeReportPayloadForBackend(payload) {
   const p = payload || {};
   const out = JSON.parse(JSON.stringify(p));
 
-  out.eventCode = String(out.eventCode || "2026A").substring(0, 5).padEnd(5, "A");
+  out.eventCode = String(out.eventCode || "pncmp").substring(0, 5).padEnd(5, "A");
   out.matchType = out.matchType || "QUALIFICATION";
   out.alliance = out.alliance === "BLUE" ? "BLUE" : "RED";
 
@@ -1347,9 +1347,61 @@ function processSingleMatch(str) {
     return Promise.resolve(null);
   }
 
-  const matchNum = parseInt(p[1], 10);
+  const normalizePlayoffRef = (rawRef) => {
+    const cleaned = String(rawRef || "")
+      .toUpperCase()
+      .replace(/\s+/g, "")
+      .replace(/[-_]/g, "");
+
+    if (!cleaned) return "";
+    if (/^F\d+$/.test(cleaned)) return cleaned;
+
+    const bracketMatch = cleaned.match(/^(EF|QF|SF)(\d+)(?:M)?(\d+)$/);
+    if (bracketMatch) {
+      return `${bracketMatch[1]}${bracketMatch[2]}M${bracketMatch[3]}`;
+    }
+
+    return cleaned;
+  };
+
+  const encodePlayoffRef = (playoffRef) => {
+    const normalized = normalizePlayoffRef(playoffRef);
+    const finalMatch = normalized.match(/^F(\d+)$/);
+    if (finalMatch) {
+      return 4000 + (parseInt(finalMatch[1], 10) || 0);
+    }
+
+    const bracketMatch = normalized.match(/^(EF|QF|SF)(\d+)M(\d+)$/);
+    if (bracketMatch) {
+      const baseMap = {
+        EF: 1000,
+        QF: 2000,
+        SF: 3000,
+      };
+      const setNum = parseInt(bracketMatch[2], 10) || 0;
+      const matchNum = parseInt(bracketMatch[3], 10) || 0;
+      return baseMap[bracketMatch[1]] + setNum * 10 + matchNum;
+    }
+
+    return Math.max(1, parseInt(normalized, 10) || 1);
+  };
+
+  const rawMatchRef = String(p[26] || p[1] || "").trim();
+  const normalizedPlayoffRef = normalizePlayoffRef(rawMatchRef);
+  const rawMatchType = String(p[27] || "").toUpperCase();
+  const inferredPlayoff = /^(EF|QF|SF)\d+M\d+$/.test(normalizedPlayoffRef) || /^F\d+$/.test(normalizedPlayoffRef);
+  const isPlayoff = rawMatchType === "PLAY" || rawMatchType === "PLAYOFF" || inferredPlayoff;
+
+  const matchRef = isPlayoff
+    ? normalizedPlayoffRef || rawMatchRef || "1"
+    : String(parseInt(rawMatchRef || p[1] || "1", 10) || 1);
+
+  const matchNum = isPlayoff
+    ? encodePlayoffRef(matchRef)
+    : Math.max(1, parseInt(matchRef, 10) || 1);
+
   const teamNum = parseInt(p[2], 10);
-  if (Number.isNaN(matchNum) || Number.isNaN(teamNum)) {
+  if (Number.isNaN(teamNum)) {
     log("Invalid match/team values in QR payload.", "error");
     return Promise.resolve(null);
   }
@@ -1367,8 +1419,8 @@ function processSingleMatch(str) {
 
   const payload = {
     createdAt: new Date().toISOString(),
-    eventCode: (p[0] || "2026A").substring(0, 5).padEnd(5, "A"),
-    matchType: "QUALIFICATION",
+    eventCode: (p[0] || "pncmp").substring(0, 5).padEnd(5, "A"),
+    matchType: isPlayoff ? "PLAYOFF" : "QUALIFICATION",
     matchNumber: matchNum,
     alliance: p[21] ? (p[21].startsWith("Blue") ? "BLUE" : "RED") : "RED",
     teamNumber: teamNum,
@@ -1422,37 +1474,37 @@ function processSingleMatch(str) {
   })
     .then((res) => {
       if (res.status === 201) {
-        log(`Saved Match ${p[1]} (Team ${p[2]})`, "success");
+        log(`Saved Match ${matchRef} (Team ${p[2]})`, "success");
         upsertRecentReport(sanitizedPayload, "Saved");
-        return { match: p[1], team: p[2] };
+        return { match: matchRef, team: p[2] };
       }
       return res.json().then((err) => {
         if (err.message && err.message.indexOf("Unique") !== -1) {
-          log(`Match ${p[1]} already saved. Skipped.`, "info");
+          log(`Match ${matchRef} already saved. Skipped.`, "info");
           upsertRecentReport(sanitizedPayload, "Saved");
-          return { match: p[1], team: p[2] };
+          return { match: matchRef, team: p[2] };
         }
         log(
-          `Backend rejected Match ${p[1]} (Team ${p[2]}): ${err.message || JSON.stringify(err)}`,
+          `Backend rejected Match ${matchRef} (Team ${p[2]}): ${err.message || JSON.stringify(err)}`,
           "error",
         );
         const queued = enqueuePendingReport(sanitizedPayload);
         if (queued) {
-          log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
+          log(`Offline save queued for Match ${matchRef} (Team ${p[2]}).`, "info");
           upsertRecentReport(sanitizedPayload, "Queued");
         }
-        return { match: p[1], team: p[2] };
+        return { match: matchRef, team: p[2] };
       });
     })
     .catch((_e) => {
       const queued = enqueuePendingReport(sanitizedPayload);
       if (queued) {
-        log(`Offline save queued for Match ${p[1]} (Team ${p[2]}).`, "info");
+        log(`Offline save queued for Match ${matchRef} (Team ${p[2]}).`, "info");
         upsertRecentReport(sanitizedPayload, "Queued");
       } else {
-        log(`Already queued offline: Match ${p[1]} (Team ${p[2]}).`, "info");
+        log(`Already queued offline: Match ${matchRef} (Team ${p[2]}).`, "info");
       }
-      return { match: p[1], team: p[2] };
+      return { match: matchRef, team: p[2] };
     });
 }
 
